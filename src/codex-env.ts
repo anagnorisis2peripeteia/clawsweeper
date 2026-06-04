@@ -1,3 +1,17 @@
+const VALID_LOGIN_METHODS = new Set(["api", "chatgpt"]);
+
+export function resolveCodexLoginMethod(): string {
+  const value = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD?.trim().toLowerCase();
+  if (value && VALID_LOGIN_METHODS.has(value)) {
+    return value;
+  }
+  return "api";
+}
+
+export function codexLoginMethodConfig(): string {
+  return `forced_login_method="${resolveCodexLoginMethod()}"`;
+}
+
 export type CodexEnvOptions = {
   ghToken?: string | undefined;
 };

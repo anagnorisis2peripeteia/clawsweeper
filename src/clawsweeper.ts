@@ -24,7 +24,7 @@ import {
   repositoryProfileForSlug,
   type RepositoryProfile,
 } from "./repository-profiles.js";
-import { codexEnv } from "./codex-env.js";
+import { codexEnv, codexLoginMethodConfig } from "./codex-env.js";
 import {
   ghRetryKind,
   ghRetryWaitMs,
@@ -66,7 +66,7 @@ import {
 } from "./clawsweeper-args.js";
 import { escapeRegExp, safeOutputTail, trimMiddle, truncateText } from "./clawsweeper-text.js";
 
-export { codexEnv } from "./codex-env.js";
+export { codexEnv, resolveCodexLoginMethod, codexLoginMethodConfig } from "./codex-env.js";
 export { parseGhJson, parseGhJsonLines } from "./github-json.js";
 export { itemNumbersArg } from "./clawsweeper-args.js";
 export { safeOutputTail } from "./clawsweeper-text.js";
@@ -6174,12 +6174,14 @@ function runCodex(options: {
   }
   const codexConfig = [
     `model_reasoning_effort="${options.reasoningEffort}"`,
-    'forced_login_method="api"',
+    codexLoginMethodConfig(),
     'approval_policy="never"',
   ];
   if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
+  const codexBin = process.env.CODEX_BIN ?? "codex";
+  const useShell = process.platform === "win32";
   const result = spawnSync(
-    "codex",
+    codexBin,
     [
       "exec",
       "-m",
@@ -6207,6 +6209,7 @@ function runCodex(options: {
       input: prompt,
       maxBuffer: 128 * 1024 * 1024,
       timeout: options.timeoutMs,
+      ...(useShell ? { shell: true } : {}),
     },
   );
   const dirtyAfter = openclawDirtyStatus(options.openclawDir);
@@ -6434,11 +6437,13 @@ function runCodexAssist(options: {
   writeFileSync(promptPath, prompt, "utf8");
   const codexConfig = [
     `model_reasoning_effort="${options.reasoningEffort}"`,
-    'forced_login_method="api"',
+    codexLoginMethodConfig(),
     'approval_policy="never"',
   ];
+  const codexBin = process.env.CODEX_BIN ?? "codex";
+  const useShell = process.platform === "win32";
   const result = spawnSync(
-    "codex",
+    codexBin,
     [
       "exec",
       "-m",
@@ -6457,6 +6462,7 @@ function runCodexAssist(options: {
       input: prompt,
       maxBuffer: 32 * 1024 * 1024,
       timeout: options.timeoutMs,
+      ...(useShell ? { shell: true } : {}),
     },
   );
   if (result.error || result.status !== 0 || !existsSync(outputPath)) {
@@ -16908,6 +16914,130 @@ function checkCommand(): void {
   console.log("ok");
 }
 
+function localReviewCommand(args: Args): void {
+  const targetDir = resolve(stringArg(args.target_dir, "."));
+  const targetRepoArg = stringArg(args.repo, "");
+  const baseBranch = stringArg(args.base, "main");
+  const model = stringArg(args.codex_model, DEFAULT_CODEX_MODEL);
+  const reasoningEffort = stringArg(args.codex_reasoning_effort, DEFAULT_REASONING_EFFORT);
+  const sandboxMode = stringArg(args.codex_sandbox, "read-only");
+  const serviceTier = stringArg(args.codex_service_tier, DEFAULT_SERVICE_TIER);
+  const timeoutMs = numberArg(args.codex_timeout_ms, 600_000);
+  const outputDir = resolve(stringArg(args.output_dir, join(homedir(), ".clawsweeper-local-reviews")));
+  ensureDir(outputDir);
+
+  const repoName =
+    targetRepoArg ||
+    run("git", ["remote", "get-url", "origin"], { cwd: targetDir })
+      .replace(/.*github\.com[:/]/, "")
+      .replace(/\.git\s*$/, "")
+      .trim();
+
+  const diff = run("git", ["diff", `${baseBranch}...HEAD`], { cwd: targetDir });
+  if (!diff.trim()) {
+    console.error("[local-review] no diff against " + baseBranch);
+    process.exit(1);
+  }
+
+  const commitTitle = run("git", ["log", "--format=%s", "-1"], { cwd: targetDir }).trim();
+  const commitBody = run("git", ["log", "--format=%b", "-1"], { cwd: targetDir }).trim();
+  const author = run("git", ["log", "--format=%an", "-1"], { cwd: targetDir }).trim();
+  const headSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
+  const baseSha = run("git", ["rev-parse", baseBranch], { cwd: targetDir }).trim();
+  const changedFiles = run("git", ["diff", "--name-only", `${baseBranch}...HEAD`], { cwd: targetDir })
+    .trim()
+    .split("\n")
+    .filter(Boolean);
+
+  const prBodyFile = stringArg(args.pr_body_file, "");
+  let prBodyOverride = "";
+  if (prBodyFile) {
+    const resolvedBodyFile = resolve(prBodyFile);
+    if (!existsSync(resolvedBodyFile)) {
+      throw new Error(`--pr-body-file not found: ${resolvedBodyFile}`);
+    }
+    prBodyOverride = readFileSync(resolvedBodyFile, "utf8").trim();
+  }
+  const prBody = prBodyOverride || commitBody || commitTitle;
+
+  const now = new Date().toISOString();
+  const item: Item = {
+    repo: repoName,
+    number: 0,
+    kind: "pull_request",
+    title: commitTitle,
+    url: `local://${repoName}@${headSha.slice(0, 8)}`,
+    createdAt: now,
+    updatedAt: now,
+    closedAt: null,
+    author,
+    authorAssociation: "CONTRIBUTOR",
+    labels: [],
+    locked: false,
+    activeLockReason: null,
+  };
+
+  const context: ItemContext = {
+    issue: { title: commitTitle, body: prBody, user: { login: author }, state: "open" },
+    comments: [],
+    timeline: [],
+    pullRequest: {
+      title: commitTitle,
+      body: prBody,
+      head: { sha: headSha, ref: "HEAD" },
+      base: { sha: baseSha, ref: baseBranch },
+      diff,
+      changed_files: changedFiles.length,
+      additions: diff.split("\n").filter((l: string) => l.startsWith("+") && !l.startsWith("+++")).length,
+      deletions: diff.split("\n").filter((l: string) => l.startsWith("-") && !l.startsWith("---")).length,
+      mergeable: true,
+      user: { login: author },
+    },
+    pullFiles: changedFiles.map((f: string) => ({ filename: f, status: "modified", patch: "" })),
+    pullCommits: [{ sha: headSha, commit: { message: commitTitle + "\n\n" + commitBody } }],
+    pullReviewComments: [],
+    counts: { comments: 0, timeline: 0 },
+  };
+
+  const git: GitInfo = { mainSha: baseSha, latestRelease: null };
+
+  try {
+    setTargetRepo(repoName);
+  } catch {
+    setTargetRepo("openclaw/openclaw");
+  }
+
+  console.error(
+    `[local-review] repo=${repoName} base=${baseBranch} files=${changedFiles.length} diff=${diff.length} chars`,
+  );
+  console.error(`[local-review] title: ${commitTitle}`);
+  console.error(`[local-review] model=${model} reasoning=${reasoningEffort}`);
+
+  const staleOutputPath = join(outputDir, `${item.number}.json`);
+  if (existsSync(staleOutputPath)) {
+    unlinkSync(staleOutputPath);
+  }
+
+  const decision = runCodex({
+    item,
+    context,
+    git,
+    model,
+    openclawDir: targetDir,
+    reasoningEffort,
+    sandboxMode,
+    serviceTier,
+    timeoutMs,
+    workDir: outputDir,
+    additionalPrompt: `This is a LOCAL review of staged changes, not a GitHub PR. The diff is from git diff ${baseBranch}...HEAD. Focus on code correctness, not PR metadata.`,
+  });
+
+  const outputPath = join(outputDir, "local-review.json");
+  writeFileSync(outputPath, JSON.stringify(decision, null, 2), "utf8");
+  console.error(`[local-review] decision written to ${outputPath}`);
+  console.log(JSON.stringify(decision, null, 2));
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   const command = args._[0] ?? "review";
@@ -16927,6 +17057,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   } else if (command === "status") statusCommand(args);
   else if (command === "assist") assistCommand(args);
   else if (command === "check") checkCommand();
+  else if (command === "local-review") localReviewCommand(args);
   else {
     console.error(`Unknown command: ${command}`);
     process.exit(1);

@@ -34,6 +34,8 @@ import {
   referencingMergedPullRequestsForIssueForTest,
   configSurfaceChangeFromPullFilesForTest,
   codexEnv,
+  resolveCodexLoginMethod,
+  codexLoginMethodConfig,
   dashboardClosedAt,
   extractLatestClawSweeperReviewForTest,
   filterReviewContextCommentsForTest,
@@ -13873,6 +13875,100 @@ process.exit(1);
   }
 });
 
+test("runCodex accepts synthetic local-review Item and ItemContext shapes", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "codex-work");
+  const binDir = join(root, "bin");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const scriptBody = `const fs = require("node:fs");
+const outputIndex = process.argv.indexOf("--output-last-message");
+fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+`;
+  if (process.platform === "win32") {
+    const scriptPath = join(binDir, "codex-fake.js");
+    writeFileSync(scriptPath, scriptBody);
+    writeFileSync(join(binDir, "codex.cmd"), `@echo off\nnode "${scriptPath}" %*\n`);
+  } else {
+    const codexPath = join(binDir, "codex");
+    writeFileSync(codexPath, `#!/usr/bin/env node\n${scriptBody}`, { mode: 0o755 });
+  }
+  const originalPath = process.env.PATH;
+  const originalDecision = process.env.CODEX_DECISION_JSON;
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.CODEX_DECISION_JSON = JSON.stringify(
+    closeDecision({
+      decision: "keep_open",
+      closeReason: "none",
+      confidence: "medium",
+      summary: "Local review test.",
+      bestSolution: "Verify synthetic shapes.",
+      closeComment: "",
+      workReason: "Test.",
+    }),
+  );
+  try {
+    const decision = runCodexForTest({
+      item: {
+        repo: "test/repo",
+        number: 0,
+        kind: "pull_request",
+        title: "local change",
+        url: "local://test/repo@abc12345",
+        createdAt: "2026-06-04T00:00:00Z",
+        updatedAt: "2026-06-04T00:00:00Z",
+        closedAt: null,
+        author: "localuser",
+        authorAssociation: "CONTRIBUTOR",
+        labels: [],
+        locked: false,
+        activeLockReason: null,
+      },
+      context: {
+        issue: { title: "local change", body: "test body", user: { login: "localuser" }, state: "open" },
+        comments: [],
+        timeline: [],
+        pullRequest: {
+          title: "local change",
+          body: "test body",
+          head: { sha: "abc1234567890", ref: "HEAD" },
+          base: { sha: "def0987654321", ref: "main" },
+          diff: "+added line\n-removed line",
+          changed_files: 1,
+          additions: 1,
+          deletions: 1,
+          mergeable: true,
+          user: { login: "localuser" },
+        },
+        pullFiles: [{ filename: "test.ts", status: "modified", patch: "" }],
+        pullCommits: [{ sha: "abc1234567890", commit: { message: "local change" } }],
+        pullReviewComments: [],
+        counts: { comments: 0, timeline: 0 },
+      },
+      git: { mainSha: "def0987654321", latestRelease: null },
+      model: "gpt-test",
+      openclawDir,
+      reasoningEffort: "high",
+      sandboxMode: "read-only",
+      serviceTier: "",
+      timeoutMs: 10_000,
+      workDir,
+      prompt: "Review this local change.",
+    });
+
+    assert.equal(decision.decision, "keep_open");
+    assert.equal(decision.summary, "Local review test.");
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalDecision === undefined) delete process.env.CODEX_DECISION_JSON;
+    else process.env.CODEX_DECISION_JSON = originalDecision;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("decision parser enforces required schema-shaped evidence", () => {
   assert.equal(parseDecision(closeDecision()).decision, "close");
   assert.equal(parseDecision(closeDecision({ itemCategory: "skill" })).itemCategory, "skill");
@@ -16724,6 +16820,54 @@ test("codex subprocess env can expose an explicit read-only GitHub token", () =>
     assert.equal(env.GIT_OPTIONAL_LOCKS, "0");
   } finally {
     process.env = originalEnv;
+  }
+});
+
+test("resolveCodexLoginMethod defaults to api", () => {
+  const original = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+  try {
+    delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    assert.equal(resolveCodexLoginMethod(), "api");
+  } finally {
+    if (original === undefined) delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    else process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = original;
+  }
+});
+
+test("resolveCodexLoginMethod accepts chatgpt", () => {
+  const original = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+  try {
+    process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = "chatgpt";
+    assert.equal(resolveCodexLoginMethod(), "chatgpt");
+  } finally {
+    if (original === undefined) delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    else process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = original;
+  }
+});
+
+test("resolveCodexLoginMethod rejects invalid values", () => {
+  const original = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+  try {
+    process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = "oauth-browser";
+    assert.equal(resolveCodexLoginMethod(), "api");
+    process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = "";
+    assert.equal(resolveCodexLoginMethod(), "api");
+  } finally {
+    if (original === undefined) delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    else process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = original;
+  }
+});
+
+test("codexLoginMethodConfig produces valid Codex config string", () => {
+  const original = process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+  try {
+    delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    assert.equal(codexLoginMethodConfig(), 'forced_login_method="api"');
+    process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = "chatgpt";
+    assert.equal(codexLoginMethodConfig(), 'forced_login_method="chatgpt"');
+  } finally {
+    if (original === undefined) delete process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD;
+    else process.env.CLAWSWEEPER_CODEX_LOGIN_METHOD = original;
   }
 });
 

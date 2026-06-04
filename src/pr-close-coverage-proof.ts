@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { codexEnv } from "./codex-env.js";
+import { codexEnv, codexLoginMethodConfig } from "./codex-env.js";
 import { safeOutputTail, truncateText } from "./clawsweeper-text.js";
 
 export type PrCloseCoverageProofModelDecision = "covered" | "keep_open";
@@ -252,14 +252,16 @@ export function runPrCloseCoverageProofModel(options: {
   if (existsSync(outputPath)) unlinkSync(outputPath);
   const codexConfig = [
     `model_reasoning_effort="${options.runtime.reasoningEffort}"`,
-    'forced_login_method="api"',
+    codexLoginMethodConfig(),
     'approval_policy="never"',
   ];
   if (options.runtime.serviceTier) {
     codexConfig.splice(1, 0, `service_tier="${options.runtime.serviceTier}"`);
   }
+  const codexBin = process.env.CODEX_BIN ?? "codex";
+  const useShell = process.platform === "win32";
   const result = spawnSync(
-    "codex",
+    codexBin,
     [
       "exec",
       "-m",
@@ -282,6 +284,7 @@ export function runPrCloseCoverageProofModel(options: {
       input: prompt,
       maxBuffer: 64 * 1024 * 1024,
       timeout: options.runtime.timeoutMs,
+      ...(useShell ? { shell: true } : {}),
     },
   );
   if (result.error) {
