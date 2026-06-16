@@ -480,6 +480,12 @@ export function localReviewAdditionalPrompt(
 function localReviewCommand(args: Args): void {
   const targetDir = resolve(argString(args, "target_dir", "."));
   const baseBranch = argString(args, "base", "main");
+  // Validate the engine up front, before creating any run state.
+  const engine = argString(args, "engine", "codex");
+  if (engine !== "codex" && engine !== "claude") {
+    console.error(`[local-review] --engine must be "codex" or "claude", got "${engine}"`);
+    process.exit(1);
+  }
   const reportDir = resolve(
     argString(args, "report_dir", join(homedir(), ".clawsweeper-local-reviews")),
   );
@@ -541,9 +547,8 @@ function localReviewCommand(args: Args): void {
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
   );
 
-  // codex is the built-in default engine; --engine claude drives a fixed `claude`
-  // CLI through the same bounded runner (provider-neutral, zero new deps).
-  const engine = argString(args, "engine", "codex");
+  // engine validated up front; codex is the default, --engine claude drives a fixed
+  // `claude` CLI through the same bounded runner (provider-neutral, zero new deps).
   let reviewMarkdown: string;
   if (engine === "claude") {
     reviewMarkdown = runClaudeReview({
@@ -555,7 +560,7 @@ function localReviewCommand(args: Args): void {
       timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
       additionalPrompt,
     });
-  } else if (engine === "codex") {
+  } else {
     reviewMarkdown = runCodex({
       targetDir,
       targetRepo,
@@ -571,9 +576,6 @@ function localReviewCommand(args: Args): void {
       additionalPrompt,
       extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
     });
-  } else {
-    console.error(`[local-review] --engine must be "codex" or "claude", got "${engine}"`);
-    process.exit(1);
   }
   const markdown = ensureCommitReportTimestamps(reviewMarkdown, metadata);
 
