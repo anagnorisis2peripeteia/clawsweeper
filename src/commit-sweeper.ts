@@ -353,6 +353,64 @@ function runCodex(options: {
   return stripMarkdownFence(readFileSync(outputPath, "utf8"));
 }
 
+// Local-review Claude engine: drives a FIXED `claude` CLI through the same bounded
+// runner as codex (no operator-configurable binary), credentials scrubbed via
+// codexEnv, read-only tools. Auth is the caller's existing Claude auth — for a
+// subscription set CLAUDE_CODE_OAUTH_TOKEN (and leave ANTHROPIC_API_KEY unset).
+function runClaudeReview(options: {
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForCommit({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+  });
+  const result = runCodexProcess({
+    command: "claude",
+    args: ["-p", "--output-format", "text", "--allowedTools", "Read Grep Glob"],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: prompt,
+    timeoutMs: options.timeoutMs,
+  });
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr)}`
+        : `exit ${result.status ?? "unknown"}\n${safeOutputTail(result.stderr) || "No output."}`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(result.stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: "claude produced no output",
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
 function reviewCommand(args: Args): void {
   const targetRepo = argString(args, "target_repo", DEFAULT_TARGET_REPO);
   const targetDir = resolve(
@@ -483,8 +541,22 @@ function localReviewCommand(args: Args): void {
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
   );
 
-  const markdown = ensureCommitReportTimestamps(
-    runCodex({
+  // codex is the built-in default engine; --engine claude drives a fixed `claude`
+  // CLI through the same bounded runner (provider-neutral, zero new deps).
+  const engine = argString(args, "engine", "codex");
+  let reviewMarkdown: string;
+  if (engine === "claude") {
+    reviewMarkdown = runClaudeReview({
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
+      additionalPrompt,
+    });
+  } else if (engine === "codex") {
+    reviewMarkdown = runCodex({
       targetDir,
       targetRepo,
       sha: headSha,
@@ -498,9 +570,12 @@ function localReviewCommand(args: Args): void {
       workDir: runDir,
       additionalPrompt,
       extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
-    }),
-    metadata,
-  );
+    });
+  } else {
+    console.error(`[local-review] --engine must be "codex" or "claude", got "${engine}"`);
+    process.exit(1);
+  }
+  const markdown = ensureCommitReportTimestamps(reviewMarkdown, metadata);
 
   const outputPath = join(runDir, "local-review.md");
   writeFileSync(outputPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");
