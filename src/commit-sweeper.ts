@@ -399,7 +399,7 @@ ${diff || "(empty diff)"}
   const stdoutPath = join(options.workDir, "claude-stdout.log");
   const result = runCodexProcess({
     command: "claude",
-    args: ["-p", "--output-format", "text", "--allowedTools", "Read Grep Glob"],
+    args: ["-p", "--output-format", "text", "--allowedTools", "Read,Grep,Glob"],
     cwd: options.targetDir,
     env: codexEnv(),
     input: prompt,
