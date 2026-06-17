@@ -364,16 +364,39 @@ function runClaudeReview(options: {
   baseSha: string;
   metadata: CommitMetadata;
   timeoutMs: number;
+  workDir: string;
   additionalPrompt: string;
 }): string {
-  const prompt = promptForCommit({
+  // The claude reviewer is read-only (Read/Grep/Glob, no shell), so unlike the
+  // sandboxed codex lane it cannot run `git` to inspect the range. Embed the full
+  // committed-range diff in the prompt so it reviews the actual change, not just the
+  // current HEAD files plus a changed-file list.
+  const rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
+    cwd: options.targetDir,
+  });
+  const maxDiffBytes = 256 * 1024;
+  const diff =
+    rawDiff.length > maxDiffBytes
+      ? `${rawDiff.slice(0, maxDiffBytes)}\n…(diff truncated at ${maxDiffBytes} bytes)…`
+      : rawDiff;
+  const prompt = `${promptForCommit({
     targetDir: options.targetDir,
     targetRepo: options.targetRepo,
     sha: options.sha,
     baseSha: options.baseSha,
     metadata: options.metadata,
     additionalPrompt: options.additionalPrompt,
-  });
+  })}
+
+## Full Range Diff (\`${options.baseSha}..${options.sha}\`)
+
+\`\`\`diff
+${diff || "(empty diff)"}
+\`\`\`
+`;
+  // Capture the FULL stdout (not the runner's 64 KiB tail) so a large report's YAML
+  // front matter at the top is never truncated away.
+  const stdoutPath = join(options.workDir, "claude-stdout.log");
   const result = runCodexProcess({
     command: "claude",
     args: ["-p", "--output-format", "text", "--allowedTools", "Read Grep Glob"],
@@ -381,13 +404,17 @@ function runClaudeReview(options: {
     env: codexEnv(),
     input: prompt,
     timeoutMs: options.timeoutMs,
+    stdoutPath,
   });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
   if (result.error || result.status !== 0) {
     const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
     const detail =
       result.error instanceof Error
-        ? `${result.error.message}\n${safeOutputTail(result.stderr)}`
-        : `exit ${result.status ?? "unknown"}\n${safeOutputTail(result.stderr) || "No output."}`;
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
     return failureReport({
       targetRepo: options.targetRepo,
       sha: options.sha,
@@ -397,7 +424,7 @@ function runClaudeReview(options: {
       timeout,
     });
   }
-  const markdown = stripMarkdownFence(result.stdout);
+  const markdown = stripMarkdownFence(stdout);
   if (!markdown.trim()) {
     return failureReport({
       targetRepo: options.targetRepo,
@@ -558,6 +585,7 @@ function localReviewCommand(args: Args): void {
       baseSha,
       metadata,
       timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
+      workDir: runDir,
       additionalPrompt,
     });
   } else {
