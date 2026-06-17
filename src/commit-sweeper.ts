@@ -371,9 +371,28 @@ function runClaudeReview(options: {
   // sandboxed codex lane it cannot run `git` to inspect the range. Embed the full
   // committed-range diff in the prompt so it reviews the actual change, not just the
   // current HEAD files plus a changed-file list.
-  const rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
-    cwd: options.targetDir,
-  });
+  // `run` buffers the whole diff host-side (execFileSync). A huge whole-branch diff
+  // (vendored/generated/binary-ish blobs) can exceed the maxBuffer ceiling and throw
+  // before the cap below ever applies — degrade to a failure report, like the rest of
+  // the lane, instead of aborting the process with a stack trace. (codex avoids this by
+  // diffing inside its own sandbox.)
+  let rawDiff: string;
+  try {
+    rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
+      cwd: options.targetDir,
+    });
+  } catch (error) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: `failed to read range diff: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      timeout: false,
+    });
+  }
   const maxDiffBytes = 256 * 1024;
   const diff =
     rawDiff.length > maxDiffBytes
