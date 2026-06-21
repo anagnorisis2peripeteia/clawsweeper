@@ -353,6 +353,110 @@ function runCodex(options: {
   return stripMarkdownFence(readFileSync(outputPath, "utf8"));
 }
 
+// Local-review Claude engine: drives a FIXED `claude` CLI through the same bounded
+// runner as codex (no operator-configurable binary), credentials scrubbed via
+// codexEnv, read-only tools. Auth is the caller's existing Claude auth — for a
+// subscription set CLAUDE_CODE_OAUTH_TOKEN (and leave ANTHROPIC_API_KEY unset).
+function runClaudeReview(options: {
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  // The claude reviewer is read-only (Read/Grep/Glob, no shell), so unlike the
+  // sandboxed codex lane it cannot run `git` to inspect the range. Embed the full
+  // committed-range diff in the prompt so it reviews the actual change, not just the
+  // current HEAD files plus a changed-file list.
+  // `run` buffers the whole diff host-side (execFileSync). A huge whole-branch diff
+  // (vendored/generated/binary-ish blobs) can exceed the maxBuffer ceiling and throw
+  // before the cap below ever applies — degrade to a failure report, like the rest of
+  // the lane, instead of aborting the process with a stack trace. (codex avoids this by
+  // diffing inside its own sandbox.)
+  let rawDiff: string;
+  try {
+    rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
+      cwd: options.targetDir,
+    });
+  } catch (error) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: `failed to read range diff: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      timeout: false,
+    });
+  }
+  const maxDiffBytes = 256 * 1024;
+  const diff =
+    rawDiff.length > maxDiffBytes
+      ? `${rawDiff.slice(0, maxDiffBytes)}\n…(diff truncated at ${maxDiffBytes} bytes)…`
+      : rawDiff;
+  const prompt = `${promptForCommit({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+  })}
+
+## Full Range Diff (\`${options.baseSha}..${options.sha}\`)
+
+\`\`\`diff
+${diff || "(empty diff)"}
+\`\`\`
+`;
+  // Capture the FULL stdout (not the runner's 64 KiB tail) so a large report's YAML
+  // front matter at the top is never truncated away.
+  const stdoutPath = join(options.workDir, "claude-stdout.log");
+  const result = runCodexProcess({
+    command: "claude",
+    args: ["-p", "--output-format", "text", "--allowedTools", "Read,Grep,Glob"],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: prompt,
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: "claude produced no output",
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
 function reviewCommand(args: Args): void {
   const targetRepo = argString(args, "target_repo", DEFAULT_TARGET_REPO);
   const targetDir = resolve(
@@ -422,6 +526,12 @@ export function localReviewAdditionalPrompt(
 function localReviewCommand(args: Args): void {
   const targetDir = resolve(argString(args, "target_dir", "."));
   const baseBranch = argString(args, "base", "main");
+  // Validate the engine up front, before creating any run state.
+  const engine = argString(args, "engine", "codex");
+  if (engine !== "codex" && engine !== "claude") {
+    console.error(`[local-review] --engine must be "codex" or "claude", got "${engine}"`);
+    process.exit(1);
+  }
   const reportDir = resolve(
     argString(args, "report_dir", join(homedir(), ".clawsweeper-local-reviews")),
   );
@@ -483,8 +593,22 @@ function localReviewCommand(args: Args): void {
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
   );
 
-  const markdown = ensureCommitReportTimestamps(
-    runCodex({
+  // engine validated up front; codex is the default, --engine claude drives a fixed
+  // `claude` CLI through the same bounded runner (provider-neutral, zero new deps).
+  let reviewMarkdown: string;
+  if (engine === "claude") {
+    reviewMarkdown = runClaudeReview({
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt,
+    });
+  } else {
+    reviewMarkdown = runCodex({
       targetDir,
       targetRepo,
       sha: headSha,
@@ -498,9 +622,9 @@ function localReviewCommand(args: Args): void {
       workDir: runDir,
       additionalPrompt,
       extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
-    }),
-    metadata,
-  );
+    });
+  }
+  const markdown = ensureCommitReportTimestamps(reviewMarkdown, metadata);
 
   const outputPath = join(runDir, "local-review.md");
   writeFileSync(outputPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");

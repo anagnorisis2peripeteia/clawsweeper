@@ -111,6 +111,28 @@ test("local-review rejects repositories covered only by a generic owner fallback
   }
 });
 
+test("local-review rejects an unknown --engine", () => {
+  const dir = initRepo();
+  try {
+    const base = git(dir, "rev-parse", "HEAD");
+    writeFileSync(join(dir, "b.txt"), "2\n");
+    git(dir, "add", "b.txt");
+    git(dir, "commit", "-q", "-m", "second");
+    const { status, out } = runLocalReview(dir, [
+      "--target-repo",
+      "openclaw/clawsweeper",
+      "--base",
+      base,
+      "--engine",
+      "bogus",
+    ]);
+    assert.equal(status, 1);
+    assert.match(out, /--engine must be "codex" or "claude"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("local-review reports nothing to review when HEAD has no commits beyond base", () => {
   const dir = initRepo();
   try {

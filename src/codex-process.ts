@@ -79,6 +79,9 @@ export function runCodexProcess(options: {
   stdoutPath?: string;
   stderrPath?: string;
   appServer?: CodexAppServerProcessOptions;
+  /** Override the spawned binary (defaults to codex) so the same bounded runner
+   * can drive another fixed review CLI, e.g. `claude`. */
+  command?: string;
 }): CodexProcessResult {
   const workDir = mkdtempSync(join(tmpdir(), "clawsweeper-codex-process-"));
   const optionsPath = join(workDir, "options.json");
@@ -90,7 +93,7 @@ export function runCodexProcess(options: {
       optionsPath,
       JSON.stringify({
         args: [...options.args],
-        command: codexProcessCommand(options.env),
+        command: options.command ?? codexProcessCommand(options.env),
         timeoutMs: options.timeoutMs,
         resultPath,
         stdoutPath,

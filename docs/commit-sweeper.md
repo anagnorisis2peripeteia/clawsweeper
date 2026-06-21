@@ -273,6 +273,13 @@ disables Codex web search, and explicitly forbids network lookups. Repositories
 without a configured profile are rejected (no foreign-profile fallback). Unlike the
 hosted lane it never writes to GitHub — the local Markdown report is the only output.
 
+By default `local-review` uses the **codex** engine. Pass `--engine claude` to drive a
+**fixed `claude` CLI** through the same bounded runner instead — provider-neutral, with
+zero extra dependencies. The claude engine uses your existing Claude auth; for a
+subscription set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and leave
+`ANTHROPIC_API_KEY` unset. The binary is fixed (`codex`/`claude`), never
+operator-configurable.
+
 ## Enable / Disable
 
 Target repositories can disable hook-based dispatch with:
