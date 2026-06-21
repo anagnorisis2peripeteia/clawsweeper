@@ -588,6 +588,19 @@ function localReviewCommand(args: Args): void {
   process.env.GH_CONFIG_DIR = ghEmptyConfig;
 
   const additionalPrompt = localReviewAdditionalPrompt(baseSha, headSha, baseBranch);
+  // Layer extra review policy on top of the target repo's OWN AGENTS.md/.claude/skills
+  // without editing upstream files: --additional-policy <file> (or env
+  // CLAWSWEEPER_ADDITIONAL_POLICY) is appended to the review prompt. The repo's own
+  // policy stays the authoritative base; this carries only what that policy lacks.
+  const extraPolicyPath = argString(
+    args,
+    "additional_policy",
+    process.env.CLAWSWEEPER_ADDITIONAL_POLICY ?? "",
+  );
+  const extraPolicy = extraPolicyPath ? readFileSync(resolve(extraPolicyPath), "utf8") : "";
+  const fullAdditionalPrompt = extraPolicy
+    ? `${additionalPrompt}\n\n## Additional review policy (layered on the target repo's own policy)\n${extraPolicy}`
+    : additionalPrompt;
 
   console.error(
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
@@ -605,7 +618,7 @@ function localReviewCommand(args: Args): void {
       metadata,
       timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
       workDir: runDir,
-      additionalPrompt,
+      additionalPrompt: fullAdditionalPrompt,
     });
   } else {
     reviewMarkdown = runCodex({
@@ -620,7 +633,7 @@ function localReviewCommand(args: Args): void {
       serviceTier: argString(args, "codex_service_tier", DEFAULT_SERVICE_TIER),
       timeoutMs: argNumber(args, "codex_timeout_ms", 1_800_000),
       workDir: runDir,
-      additionalPrompt,
+      additionalPrompt: fullAdditionalPrompt,
       extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
     });
   }
