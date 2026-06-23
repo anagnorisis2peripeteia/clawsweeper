@@ -55,8 +55,8 @@ export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
 export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
 export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
 export const DEFAULT_CURSOR_MODEL = "auto";
-// The read-only CLI lanes (claude/agy/cursor) embed the committed-range diff in the
-// prompt and feed it via stdin, so this cap bounds model context/cost — not OS
+// The read-only CLI lanes that feed the prompt via stdin (claude/cursor) embed the
+// committed-range diff in the prompt, so this cap bounds model context/cost — not OS
 // command-line length.
 const REVIEW_MAX_DIFF_BYTES = 256 * 1024;
 // The opencode engine passes the prompt as a CLI arg, so the embedded diff must
@@ -64,6 +64,9 @@ const REVIEW_MAX_DIFF_BYTES = 256 * 1024;
 // command line at ~32 KiB, far tighter than POSIX ARG_MAX (~256 KiB on macOS).
 // Larger diffs truncate (with a marker) — fine for a cheap gate-0 triage pass.
 const OPENCODE_MAX_DIFF_BYTES = process.platform === "win32" ? 24 * 1024 : 96 * 1024;
+// agy's --print also takes the prompt as a CLI arg (no stdin path in agy 1.0.10), so it
+// shares the same OS-command-line cap as the opencode lane.
+const AGY_MAX_DIFF_BYTES = OPENCODE_MAX_DIFF_BYTES;
 
 type LocalReviewEngine = (typeof LOCAL_REVIEW_SUPPORTED_ENGINES)[number];
 
@@ -545,7 +548,7 @@ function runAgyReview(options: {
     baseSha: options.baseSha,
     metadata: options.metadata,
     additionalPrompt: options.additionalPrompt,
-    maxDiffBytes: REVIEW_MAX_DIFF_BYTES,
+    maxDiffBytes: AGY_MAX_DIFF_BYTES,
   });
   if ("detail" in prompt) {
     return failureReport({
@@ -568,11 +571,14 @@ function runAgyReview(options: {
       "--log-file",
       join(options.workDir, `${options.engine}.log`),
       "--sandbox",
+      // agy 1.0.10: the prompt is the VALUE of --print (there is NO stdin path), so
+      // pass it as the trailing arg — unlike the claude/cursor lanes which use stdin.
       "--print",
+      prompt.prompt,
     ],
     cwd: options.targetDir,
     env: codexEnv(),
-    input: prompt.prompt,
+    input: "",
     timeoutMs: options.timeoutMs,
     stdoutPath,
   });
