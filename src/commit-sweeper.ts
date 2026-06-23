@@ -59,9 +59,11 @@ export const DEFAULT_CURSOR_MODEL = "auto";
 // prompt and feed it via stdin, so this cap bounds model context/cost — not OS
 // command-line length.
 const REVIEW_MAX_DIFF_BYTES = 256 * 1024;
-// The opencode lanes pass the prompt as a CLI arg (through the ask-opencode
-// wrapper), so their embedded diff must stay well under the OS arg-length limit.
-const OPENCODE_MAX_DIFF_BYTES = 96 * 1024;
+// The opencode engine passes the prompt as a CLI arg, so the embedded diff must
+// stay under the OS command-line limit: Windows' CreateProcessW caps the whole
+// command line at ~32 KiB, far tighter than POSIX ARG_MAX (~256 KiB on macOS).
+// Larger diffs truncate (with a marker) — fine for a cheap gate-0 triage pass.
+const OPENCODE_MAX_DIFF_BYTES = process.platform === "win32" ? 24 * 1024 : 96 * 1024;
 
 type LocalReviewEngine = (typeof LOCAL_REVIEW_SUPPORTED_ENGINES)[number];
 
