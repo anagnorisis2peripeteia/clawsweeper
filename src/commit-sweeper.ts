@@ -52,7 +52,7 @@ export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
   "cursor",
   "opencode",
 ] as const;
-export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
+export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Opus 4.6 (Thinking)";
 export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
 export const DEFAULT_CURSOR_MODEL = "auto";
 // The read-only CLI lanes that feed the prompt via stdin (claude/cursor) embed the
