@@ -306,6 +306,21 @@ override with `--cursor-model` and `--cursor-timeout-ms`. Free Cursor plans only
 permit `auto`. The review binary is fixed (`codex`/`claude`/`agy`/`agent`), never
 operator-configurable.
 
+Two **opencode** engines drive local models through the `ask-opencode` wrapper (which
+heals the SSH tunnel / launchd backend and warms the model) in read-only
+`opencode run --agent plan`:
+
+```text
+pnpm local-review -- --base main --engine opencode-qwen    # qwen3 on the H100
+pnpm local-review -- --base main --engine opencode-gemma   # Gemma-4-12B on the Mac
+```
+
+These are **Mac-local-only** (they depend on the local inference infra) and the
+cheapest/fastest rungs of the review cascade. Because small local models can
+hallucinate, their findings are **unverified candidates** — a stronger reviewer must
+sense-check them against the source before acting. Override the wrapper path with
+`--opencode-cmd` and the timeout with `--opencode-timeout-ms`.
+
 ## Enable / Disable
 
 Target repositories can disable hook-based dispatch with:

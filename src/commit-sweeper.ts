@@ -50,6 +50,8 @@ export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
   "agy-claude",
   "agy-gemini",
   "cursor",
+  "opencode-qwen",
+  "opencode-gemma",
 ] as const;
 export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
 export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
@@ -58,6 +60,9 @@ export const DEFAULT_CURSOR_MODEL = "auto";
 // prompt and feed it via stdin, so this cap bounds model context/cost — not OS
 // command-line length.
 const REVIEW_MAX_DIFF_BYTES = 256 * 1024;
+// The opencode lanes pass the prompt as a CLI arg (through the ask-opencode
+// wrapper), so their embedded diff must stay well under the OS arg-length limit.
+const OPENCODE_MAX_DIFF_BYTES = 96 * 1024;
 
 type LocalReviewEngine = (typeof LOCAL_REVIEW_SUPPORTED_ENGINES)[number];
 
@@ -692,6 +697,88 @@ function runCursorReview(options: {
   return markdown;
 }
 
+// Local-review opencode engines: drive LOCAL models (qwen3 on the H100, gemma on the
+// Mac) through the `ask-opencode` wrapper, which heals the SSH tunnel / launchd
+// backend and warms the model, then runs `opencode run --agent plan` (read-only).
+// Mac-local-only (depend on Cameron's local inference infra). These are the cheapest
+// rungs of the review cascade — small models hallucinate, so their findings are
+// UNVERIFIED candidates that a stronger reviewer must sense-check against source.
+function runOpencodeReview(options: {
+  engine: "opencode-qwen" | "opencode-gemma";
+  wrapperCmd: string;
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: OPENCODE_MAX_DIFF_BYTES,
+  });
+  if ("detail" in prompt) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: prompt.detail,
+      timeout: false,
+    });
+  }
+  const modelKey = options.engine === "opencode-qwen" ? "qwen" : "gemma";
+  const stdoutPath = join(options.workDir, `${options.engine}-stdout.log`);
+  // Trailing `--` so a `---`/`+++` diff line in the prompt is never parsed as a
+  // wrapper flag; the wrapper forwards everything after it as the opencode prompt.
+  const result = runCodexProcess({
+    command: options.wrapperCmd,
+    args: ["--model", modelKey, "--dir", options.targetDir, "--agent", "plan", "--", prompt.prompt],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: "",
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: `${options.engine} produced no output`,
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
 function reviewCommand(args: Args): void {
   const targetRepo = argString(args, "target_repo", DEFAULT_TARGET_REPO);
   const targetDir = resolve(
@@ -880,6 +967,23 @@ function localReviewCommand(args: Args): void {
       baseSha,
       metadata,
       timeoutMs: argNumber(args, "cursor_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt: fullAdditionalPrompt,
+    });
+  } else if (engine === "opencode-qwen" || engine === "opencode-gemma") {
+    reviewMarkdown = runOpencodeReview({
+      engine,
+      wrapperCmd: argString(
+        args,
+        "opencode_cmd",
+        join(process.env.HOME ?? "", ".claude/skills/ask-opencode/bin/ask-opencode"),
+      ),
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "opencode_timeout_ms", 1_800_000),
       workDir: runDir,
       additionalPrompt: fullAdditionalPrompt,
     });

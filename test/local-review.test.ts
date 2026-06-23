@@ -116,13 +116,15 @@ test("local-review rejects repositories covered only by a generic owner fallback
   }
 });
 
-test("local-review exposes distinct current engines including AGY and cursor engines", () => {
+test("local-review exposes distinct current engines including AGY, cursor, and opencode engines", () => {
   assert.deepEqual(LOCAL_REVIEW_SUPPORTED_ENGINES, [
     "codex",
     "claude",
     "agy-claude",
     "agy-gemini",
     "cursor",
+    "opencode-qwen",
+    "opencode-gemma",
   ]);
   assert.equal(DEFAULT_AGY_CLAUDE_MODEL, "Claude Sonnet 4.6 (Thinking)");
   assert.equal(DEFAULT_AGY_GEMINI_MODEL, "Gemini 3.1 Pro (High)");
@@ -167,7 +169,10 @@ test("local-review rejects an unknown --engine", () => {
       "bogus",
     ]);
     assert.equal(status, 1);
-    assert.match(out, /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor"/);
+    assert.match(
+      out,
+      /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor", "opencode-qwen", "opencode-gemma"/,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
