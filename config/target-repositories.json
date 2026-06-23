@@ -43,6 +43,19 @@
       "package_manager": "pnpm",
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "target_repo": "pytorch/pytorch",
+      "display_name": "PyTorch",
+      "checkout_dir": "pytorch",
+      "prompt_note": "External repo \u2014 LOCAL review only via `local-review --engine claude`. Never auto-close or comment. Apply the repo checkout's own AGENTS.md->CLAUDE.md->.claude/skills as the PyTorch MPS review contract. Substitutes for the absent @clawsweeper bot.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": null,
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "generic_fallbacks": [

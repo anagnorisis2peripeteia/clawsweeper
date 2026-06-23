@@ -44,6 +44,22 @@ const DEFAULT_CODEX_MODEL = PUBLIC_CODEX_MODEL;
 const DEFAULT_REASONING_EFFORT = "high";
 const DEFAULT_SERVICE_TIER = "";
 const COMMIT_REVIEW_CHECK_NAME = "ClawSweeper Commit Review";
+export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
+  "codex",
+  "claude",
+  "agy-claude",
+  "agy-gemini",
+  "cursor",
+] as const;
+export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
+export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
+export const DEFAULT_CURSOR_MODEL = "auto";
+// The read-only CLI lanes (claude/agy/cursor) embed the committed-range diff in the
+// prompt and feed it via stdin, so this cap bounds model context/cost — not OS
+// command-line length.
+const REVIEW_MAX_DIFF_BYTES = 256 * 1024;
+
+type LocalReviewEngine = (typeof LOCAL_REVIEW_SUPPORTED_ENGINES)[number];
 
 function run(command: string, commandArgs: string[], options: { cwd?: string } = {}): string {
   return runText(command, commandArgs, { cwd: options.cwd });
@@ -216,10 +232,27 @@ ${commitDiffSummary(options.targetDir, options.baseSha, options.sha)}
 ${additionalPrompt}`;
 }
 
-function stripMarkdownFence(markdown: string): string {
+export function stripMarkdownFence(markdown: string): string {
   const trimmed = markdown.trim();
   const match = trimmed.match(/^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/i);
-  return match ? (match[1]?.trim() ?? trimmed) : trimmed;
+  if (match) return match[1]?.trim() ?? trimmed;
+  const fencedReport = trimmed.match(/```(?:markdown|md)?\s*\n---\n/i);
+  if (fencedReport?.index !== undefined) {
+    const contentStart = fencedReport.index + fencedReport[0].lastIndexOf("---\n");
+    const content = trimmed.slice(contentStart);
+    const closingFence = content.lastIndexOf("\n```");
+    if (closingFence > 0) return content.slice(0, closingFence).trim();
+  }
+  const frontMatterStart = trimmed.search(/^---\n/m);
+  return frontMatterStart > 0 ? trimmed.slice(frontMatterStart).trim() : trimmed;
+}
+
+function localReviewEngineList(): string {
+  return LOCAL_REVIEW_SUPPORTED_ENGINES.map((engine) => `"${engine}"`).join(", ");
+}
+
+function isLocalReviewEngine(value: string): value is LocalReviewEngine {
+  return (LOCAL_REVIEW_SUPPORTED_ENGINES as readonly string[]).includes(value);
 }
 
 function failureReport(options: {
@@ -353,6 +386,312 @@ function runCodex(options: {
   return stripMarkdownFence(readFileSync(outputPath, "utf8"));
 }
 
+function promptForReadOnlyRangeReview(options: {
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  additionalPrompt: string;
+  maxDiffBytes: number;
+}): { prompt: string } | { detail: string } {
+  // Read-only CLI engines cannot rely on shelling out to inspect the committed
+  // range. Embed the diff so they review the actual branch delta.
+  let rawDiff: string;
+  try {
+    rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
+      cwd: options.targetDir,
+    });
+  } catch (error) {
+    return {
+      detail: `failed to read range diff: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+  const diff =
+    rawDiff.length > options.maxDiffBytes
+      ? `${rawDiff.slice(0, options.maxDiffBytes)}\n...(diff truncated at ${
+          options.maxDiffBytes
+        } bytes)...`
+      : rawDiff;
+  return {
+    prompt: `${promptForCommit({
+      targetDir: options.targetDir,
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      additionalPrompt: options.additionalPrompt,
+    })}
+
+## Full Range Diff (\`${options.baseSha}..${options.sha}\`)
+
+\`\`\`diff
+${diff || "(empty diff)"}
+\`\`\`
+
+Return only the Markdown report. Start the response with \`---\`; do not add a preamble or wrap the report in a code fence.
+`,
+  };
+}
+
+// Local-review Claude engine: drives a FIXED `claude` CLI through the same bounded
+// runner as codex (no operator-configurable binary), credentials scrubbed via
+// codexEnv, read-only tools. Auth is the caller's existing Claude auth — for a
+// subscription set CLAUDE_CODE_OAUTH_TOKEN (and leave ANTHROPIC_API_KEY unset).
+function runClaudeReview(options: {
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: REVIEW_MAX_DIFF_BYTES,
+  });
+  if ("detail" in prompt) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: prompt.detail,
+      timeout: false,
+    });
+  }
+  // Capture the FULL stdout (not the runner's 64 KiB tail) so a large report's YAML
+  // front matter at the top is never truncated away.
+  const stdoutPath = join(options.workDir, "claude-stdout.log");
+  const result = runCodexProcess({
+    command: "claude",
+    args: ["-p", "--output-format", "text", "--allowedTools", "Read,Grep,Glob"],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: prompt.prompt,
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: "claude produced no output",
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
+function agyPrintTimeout(timeoutMs: number): string {
+  return `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`;
+}
+
+// Local-review AGY engines: drive a FIXED `agy` CLI through the same bounded
+// runner, with AGY-specific engine IDs so this is never confused with the direct
+// `claude` CLI engine above or older local-review setups.
+function runAgyReview(options: {
+  engine: "agy-claude" | "agy-gemini";
+  model: string;
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: REVIEW_MAX_DIFF_BYTES,
+  });
+  if ("detail" in prompt) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: prompt.detail,
+      timeout: false,
+    });
+  }
+  const stdoutPath = join(options.workDir, `${options.engine}-stdout.log`);
+  const result = runCodexProcess({
+    command: "agy",
+    args: [
+      "--model",
+      options.model,
+      "--print-timeout",
+      agyPrintTimeout(options.timeoutMs),
+      "--log-file",
+      join(options.workDir, `${options.engine}.log`),
+      "--sandbox",
+      "--print",
+    ],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: prompt.prompt,
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: `${options.engine} produced no output`,
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
+// Local-review Cursor engine: drives the FIXED `agent` CLI (Cursor Agent) in
+// read-only `--mode ask` through the same bounded runner. `--trust` clears Cursor's
+// one-time workspace-trust gate WITHOUT granting command execution (never
+// `--yolo`/`-f`). Free Cursor plans only permit `--model auto`; override with
+// `--cursor-model`. `agent` reads the prompt from stdin like the claude/agy lanes.
+function runCursorReview(options: {
+  model: string;
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: REVIEW_MAX_DIFF_BYTES,
+  });
+  if ("detail" in prompt) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: prompt.detail,
+      timeout: false,
+    });
+  }
+  const stdoutPath = join(options.workDir, "cursor-stdout.log");
+  const result = runCodexProcess({
+    command: "agent",
+    args: ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--model", options.model],
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: prompt.prompt,
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  // Cursor Agent exits 0 even when it refuses (e.g. "ActionRequiredError: Named
+  // models unavailable" on a free plan), so a non-zero status is not the only failure
+  // mode — guard against a refusal masquerading as a review body.
+  if (/^\s*(ActionRequiredError|Error)\b/.test(stdout)) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: safeOutputTail(stdout).trim() || "cursor refused the request",
+      timeout: false,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: "cursor produced no output",
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
 function reviewCommand(args: Args): void {
   const targetRepo = argString(args, "target_repo", DEFAULT_TARGET_REPO);
   const targetDir = resolve(
@@ -422,6 +761,12 @@ export function localReviewAdditionalPrompt(
 function localReviewCommand(args: Args): void {
   const targetDir = resolve(argString(args, "target_dir", "."));
   const baseBranch = argString(args, "base", "main");
+  // Validate the engine up front, before creating any run state.
+  const engine = argString(args, "engine", "codex");
+  if (!isLocalReviewEngine(engine)) {
+    console.error(`[local-review] --engine must be ${localReviewEngineList()}, got "${engine}"`);
+    process.exit(1);
+  }
   const reportDir = resolve(
     argString(args, "report_dir", join(homedir(), ".clawsweeper-local-reviews")),
   );
@@ -478,13 +823,68 @@ function localReviewCommand(args: Args): void {
   process.env.GH_CONFIG_DIR = ghEmptyConfig;
 
   const additionalPrompt = localReviewAdditionalPrompt(baseSha, headSha, baseBranch);
+  // Layer extra review policy on top of the target repo's OWN AGENTS.md/.claude/skills
+  // without editing upstream files: --additional-policy <file> (or env
+  // CLAWSWEEPER_ADDITIONAL_POLICY) is appended to the review prompt. The repo's own
+  // policy stays the authoritative base; this carries only what that policy lacks.
+  const extraPolicyPath = argString(
+    args,
+    "additional_policy",
+    process.env.CLAWSWEEPER_ADDITIONAL_POLICY ?? "",
+  );
+  const extraPolicy = extraPolicyPath ? readFileSync(resolve(extraPolicyPath), "utf8") : "";
+  const fullAdditionalPrompt = extraPolicy
+    ? `${additionalPrompt}\n\n## Additional review policy (layered on the target repo's own policy)\n${extraPolicy}`
+    : additionalPrompt;
 
   console.error(
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
   );
 
-  const markdown = ensureCommitReportTimestamps(
-    runCodex({
+  // engine validated up front; codex is the default. The non-codex engines drive
+  // fixed local CLIs through the same bounded runner (provider-neutral, zero new deps).
+  let reviewMarkdown: string;
+  if (engine === "claude") {
+    reviewMarkdown = runClaudeReview({
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt: fullAdditionalPrompt,
+    });
+  } else if (engine === "agy-claude" || engine === "agy-gemini") {
+    reviewMarkdown = runAgyReview({
+      engine,
+      model:
+        engine === "agy-claude"
+          ? argString(args, "agy_claude_model", DEFAULT_AGY_CLAUDE_MODEL)
+          : argString(args, "agy_gemini_model", DEFAULT_AGY_GEMINI_MODEL),
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "agy_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt: fullAdditionalPrompt,
+    });
+  } else if (engine === "cursor") {
+    reviewMarkdown = runCursorReview({
+      model: argString(args, "cursor_model", DEFAULT_CURSOR_MODEL),
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "cursor_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt: fullAdditionalPrompt,
+    });
+  } else {
+    reviewMarkdown = runCodex({
       targetDir,
       targetRepo,
       sha: headSha,
@@ -496,11 +896,11 @@ function localReviewCommand(args: Args): void {
       serviceTier: argString(args, "codex_service_tier", DEFAULT_SERVICE_TIER),
       timeoutMs: argNumber(args, "codex_timeout_ms", 1_800_000),
       workDir: runDir,
-      additionalPrompt,
+      additionalPrompt: fullAdditionalPrompt,
       extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
-    }),
-    metadata,
-  );
+    });
+  }
+  const markdown = ensureCommitReportTimestamps(reviewMarkdown, metadata);
 
   const outputPath = join(runDir, "local-review.md");
   writeFileSync(outputPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");

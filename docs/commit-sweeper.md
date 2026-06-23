@@ -273,6 +273,39 @@ disables Codex web search, and explicitly forbids network lookups. Repositories
 without a configured profile are rejected (no foreign-profile fallback). Unlike the
 hosted lane it never writes to GitHub — the local Markdown report is the only output.
 
+By default `local-review` uses the **codex** engine. Pass `--engine claude` to drive a
+**fixed `claude` CLI** through the same bounded runner instead — provider-neutral, with
+zero extra dependencies. The claude engine uses your existing Claude auth; for a
+subscription set `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and leave
+`ANTHROPIC_API_KEY` unset.
+
+Two Antigravity CLI engines are also available without changing the older direct
+Claude engine:
+
+```text
+pnpm local-review -- --base main --engine agy-claude
+pnpm local-review -- --base main --engine agy-gemini
+```
+
+Both drive a fixed `agy` binary through the same bounded runner, use `agy --print`
+with sandbox restrictions, and embed the committed-range diff in the prompt. Defaults
+are `Claude Sonnet 4.6 (Thinking)` for `agy-claude` and `Gemini 3.1 Pro (High)` for
+`agy-gemini`; override with `--agy-claude-model`, `--agy-gemini-model`, and
+`--agy-timeout-ms` if your local AGY model list changes.
+
+A **cursor** engine drives the fixed `agent` CLI (Cursor Agent) in read-only
+`--mode ask`:
+
+```text
+pnpm local-review -- --base main --engine cursor
+```
+
+It passes `--trust` to clear Cursor's one-time workspace-trust gate (never
+`--yolo`/`-f`, which would allow command execution) and defaults to `--model auto`;
+override with `--cursor-model` and `--cursor-timeout-ms`. Free Cursor plans only
+permit `auto`. The review binary is fixed (`codex`/`claude`/`agy`/`agent`), never
+operator-configurable.
+
 ## Enable / Disable
 
 Target repositories can disable hook-based dispatch with:

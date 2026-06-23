@@ -8,9 +8,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   commitMetadata,
+  DEFAULT_AGY_CLAUDE_MODEL,
+  DEFAULT_AGY_GEMINI_MODEL,
+  DEFAULT_CURSOR_MODEL,
   localReviewAdditionalPrompt,
   LOCAL_REVIEW_SCRUBBED_TOKEN_ENV,
+  LOCAL_REVIEW_SUPPORTED_ENGINES,
   LOCAL_REVIEW_WEB_SEARCH_CONFIG,
+  stripMarkdownFence,
 } from "../dist/commit-sweeper.js";
 
 const GIT = process.env.GIT_BIN ?? "git";
@@ -106,6 +111,63 @@ test("local-review rejects repositories covered only by a generic owner fallback
     ]);
     assert.equal(status, 1);
     assert.match(out, /no review profile/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("local-review exposes distinct current engines including AGY and cursor engines", () => {
+  assert.deepEqual(LOCAL_REVIEW_SUPPORTED_ENGINES, [
+    "codex",
+    "claude",
+    "agy-claude",
+    "agy-gemini",
+    "cursor",
+  ]);
+  assert.equal(DEFAULT_AGY_CLAUDE_MODEL, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(DEFAULT_AGY_GEMINI_MODEL, "Gemini 3.1 Pro (High)");
+  assert.equal(DEFAULT_CURSOR_MODEL, "auto");
+});
+
+test("local-review strips AGY preamble and fenced markdown report wrappers", () => {
+  assert.equal(
+    stripMarkdownFence(`The diff is small and reviewed.
+
+\`\`\`md
+---
+sha: ${"a".repeat(40)}
+result: findings
+---
+
+# Commit aaaaaaaa
+\`\`\`
+`),
+    `---
+sha: ${"a".repeat(40)}
+result: findings
+---
+
+# Commit aaaaaaaa`,
+  );
+});
+
+test("local-review rejects an unknown --engine", () => {
+  const dir = initRepo();
+  try {
+    const base = git(dir, "rev-parse", "HEAD");
+    writeFileSync(join(dir, "b.txt"), "2\n");
+    git(dir, "add", "b.txt");
+    git(dir, "commit", "-q", "-m", "second");
+    const { status, out } = runLocalReview(dir, [
+      "--target-repo",
+      "openclaw/clawsweeper",
+      "--base",
+      base,
+      "--engine",
+      "bogus",
+    ]);
+    assert.equal(status, 1);
+    assert.match(out, /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor"/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
