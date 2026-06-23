@@ -123,8 +123,7 @@ test("local-review exposes distinct current engines including AGY, cursor, and o
     "agy-claude",
     "agy-gemini",
     "cursor",
-    "opencode-qwen",
-    "opencode-gemma",
+    "opencode",
   ]);
   assert.equal(DEFAULT_AGY_CLAUDE_MODEL, "Claude Sonnet 4.6 (Thinking)");
   assert.equal(DEFAULT_AGY_GEMINI_MODEL, "Gemini 3.1 Pro (High)");
@@ -171,7 +170,7 @@ test("local-review rejects an unknown --engine", () => {
     assert.equal(status, 1);
     assert.match(
       out,
-      /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor", "opencode-qwen", "opencode-gemma"/,
+      /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor", "opencode"/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

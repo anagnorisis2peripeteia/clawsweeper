@@ -306,20 +306,21 @@ override with `--cursor-model` and `--cursor-timeout-ms`. Free Cursor plans only
 permit `auto`. The review binary is fixed (`codex`/`claude`/`agy`/`agent`), never
 operator-configurable.
 
-Two **opencode** engines drive local models through the `ask-opencode` wrapper (which
-heals the SSH tunnel / launchd backend and warms the model) in read-only
-`opencode run --agent plan`:
+An **opencode** engine drives `opencode run --agent plan` (read-only) against whatever
+provider/model your opencode is configured for — bring your own:
 
 ```text
-pnpm local-review -- --base main --engine opencode-qwen    # qwen3 on the H100
-pnpm local-review -- --base main --engine opencode-gemma   # Gemma-4-12B on the Mac
+# configure providers/models in opencode.jsonc, then:
+pnpm local-review -- --base main --engine opencode --opencode-model <id>
 ```
 
-These are **Mac-local-only** (they depend on the local inference infra) and the
-cheapest/fastest rungs of the review cascade. Because small local models can
-hallucinate, their findings are **unverified candidates** — a stronger reviewer must
-sense-check them against the source before acting. Override the wrapper path with
-`--opencode-cmd` and the timeout with `--opencode-timeout-ms`.
+Pick any model from `opencode models` (a local ollama/openai target you've added, or a
+cloud model). Flags: `--opencode-model <id>` (omit to use opencode's default model),
+`--opencode-cmd <path>` (defaults to `opencode`; point it at a wrapper if your backend
+needs warm-up — e.g. a tunnelled local model that idle-unloads), `--opencode-timeout-ms`.
+A small local model is the cheapest/fastest cascade rung; because it can hallucinate,
+its findings are **unverified candidates** — a stronger reviewer must sense-check them
+against the source before acting.
 
 ## Enable / Disable
 

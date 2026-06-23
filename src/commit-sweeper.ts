@@ -50,8 +50,7 @@ export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
   "agy-claude",
   "agy-gemini",
   "cursor",
-  "opencode-qwen",
-  "opencode-gemma",
+  "opencode",
 ] as const;
 export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
 export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
@@ -697,15 +696,17 @@ function runCursorReview(options: {
   return markdown;
 }
 
-// Local-review opencode engines: drive LOCAL models (qwen3 on the H100, gemma on the
-// Mac) through the `ask-opencode` wrapper, which heals the SSH tunnel / launchd
-// backend and warms the model, then runs `opencode run --agent plan` (read-only).
-// Mac-local-only (depend on Cameron's local inference infra). These are the cheapest
-// rungs of the review cascade — small models hallucinate, so their findings are
-// UNVERIFIED candidates that a stronger reviewer must sense-check against source.
+// Local-review opencode engine: drives `<cmd> run --agent plan` (read-only) against
+// whatever provider/model your opencode is configured for. Pick the model with
+// `--opencode-model` (any id from `opencode models` — e.g. a local ollama/openai
+// target you've added in opencode.jsonc); override the binary with `--opencode-cmd`
+// (defaults to `opencode`; point it at a wrapper if your backend needs warm-up).
+// Provider-neutral — nothing host-specific baked in. A small local model is the
+// cheapest cascade rung; it hallucinates, so its findings are UNVERIFIED candidates a
+// stronger reviewer must sense-check against source.
 function runOpencodeReview(options: {
-  engine: "opencode-qwen" | "opencode-gemma";
-  wrapperCmd: string;
+  cmd: string;
+  model: string;
   targetDir: string;
   targetRepo: string;
   sha: string;
@@ -734,13 +735,22 @@ function runOpencodeReview(options: {
       timeout: false,
     });
   }
-  const modelKey = options.engine === "opencode-qwen" ? "qwen" : "gemma";
-  const stdoutPath = join(options.workDir, `${options.engine}-stdout.log`);
-  // Trailing `--` so a `---`/`+++` diff line in the prompt is never parsed as a
-  // wrapper flag; the wrapper forwards everything after it as the opencode prompt.
+  const stdoutPath = join(options.workDir, "opencode-stdout.log");
+  // `<cmd> run [-m MODEL] --agent plan --dir DIR -- PROMPT`. Trailing `--` so a
+  // `---`/`+++` diff line in the prompt is never parsed as a flag; omitting `-m`
+  // lets opencode use its own configured default model.
   const result = runCodexProcess({
-    command: options.wrapperCmd,
-    args: ["--model", modelKey, "--dir", options.targetDir, "--agent", "plan", "--", prompt.prompt],
+    command: options.cmd,
+    args: [
+      "run",
+      ...(options.model ? ["-m", options.model] : []),
+      "--agent",
+      "plan",
+      "--dir",
+      options.targetDir,
+      "--",
+      prompt.prompt,
+    ],
     cwd: options.targetDir,
     env: codexEnv(),
     input: "",
@@ -772,7 +782,7 @@ function runOpencodeReview(options: {
       sha: options.sha,
       baseSha: options.baseSha,
       metadata: options.metadata,
-      detail: `${options.engine} produced no output`,
+      detail: "opencode produced no output",
       timeout: false,
     });
   }
@@ -970,14 +980,10 @@ function localReviewCommand(args: Args): void {
       workDir: runDir,
       additionalPrompt: fullAdditionalPrompt,
     });
-  } else if (engine === "opencode-qwen" || engine === "opencode-gemma") {
+  } else if (engine === "opencode") {
     reviewMarkdown = runOpencodeReview({
-      engine,
-      wrapperCmd: argString(
-        args,
-        "opencode_cmd",
-        join(process.env.HOME ?? "", ".claude/skills/ask-opencode/bin/ask-opencode"),
-      ),
+      cmd: argString(args, "opencode_cmd", "opencode"),
+      model: argString(args, "opencode_model", ""),
       targetDir,
       targetRepo,
       sha: headSha,
