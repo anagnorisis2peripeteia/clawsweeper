@@ -5975,18 +5975,21 @@ function selectCandidates(options: {
   itemNumbers?: number[];
   reviewPolicy?: string;
   hotIntake?: boolean;
+  // Local-review extension: review closed/merged items too (fixtures, hypothetical
+  // re-review). Default false preserves the open-only rule for normal operation.
+  allowClosed?: boolean;
 }): { candidates: Item[]; scannedPages: number } {
   if (options.itemNumbers) {
     const candidates = options.itemNumbers.flatMap((number) => {
       const { item, state } = fetchItem(number);
-      return state === "open" ? [item] : [];
+      return state === "open" || options.allowClosed ? [item] : [];
     });
     return { candidates, scannedPages: 0 };
   }
   if (options.itemNumber) {
     if (options.shardIndex !== 0) return { candidates: [], scannedPages: 0 };
     const { item, state } = fetchItem(options.itemNumber);
-    if (state !== "open") return { candidates: [], scannedPages: 0 };
+    if (state !== "open" && !options.allowClosed) return { candidates: [], scannedPages: 0 };
     return { candidates: [item], scannedPages: 0 };
   }
   const due: DueCandidate[] = [];
@@ -16356,10 +16359,27 @@ function reviewCommand(args: Args): void {
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
-  const additionalPrompt = stringArg(
+  let additionalPrompt = stringArg(
     args.additional_prompt,
     process.env.CLAWSWEEPER_ADDITIONAL_PROMPT ?? "",
   );
+  // Local-review extensions (spirit of the standalone local-review lane, folded in):
+  // layer a repo-specific policy file, and/or substitute a hypothetical PR body (e.g.
+  // to test the real-behavior-proof / mantis decision, or to give engines that cannot
+  // fetch the live body — the gh-token-scrubbed ones — the body in the prompt).
+  const additionalPolicyFile = stringArg(args.additional_policy, "");
+  if (additionalPolicyFile) {
+    const policy = readFileSync(additionalPolicyFile, "utf8");
+    additionalPrompt = additionalPrompt
+      ? `${additionalPrompt}\n\n## Additional review policy (layered on the repo's own policy)\n${policy}`
+      : policy;
+  }
+  const allowClosed = boolArg(args.allow_closed);
+  const bodyFile = stringArg(args.body_file, "");
+  if (bodyFile) {
+    const providedBody = readFileSync(bodyFile, "utf8");
+    additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
+  }
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
   const hotIntake = boolArg(args.hot_intake);
@@ -16383,6 +16403,7 @@ function reviewCommand(args: Args): void {
     };
     if (itemNumber) selectionOptions.itemNumber = itemNumber;
     if (itemNumbers) selectionOptions.itemNumbers = itemNumbers;
+    if (allowClosed) selectionOptions.allowClosed = true;
     if (hotIntake) selectionOptions.hotIntake = true;
     if (humanLocalReview) {
       console.error("");
