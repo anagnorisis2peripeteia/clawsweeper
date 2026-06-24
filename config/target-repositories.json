@@ -71,6 +71,19 @@
       "package_manager": "pnpm",
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "owner": "pytorch",
+      "deny_repositories": [],
+      "allow_repo_name_pattern": "^[A-Za-z0-9_.-]+$",
+      "prompt_note": "Use the {target_repo} source tree and current default branch. This repository is using the generic onboarding profile for local advisory review only, so review conservatively and do not auto-close issues or pull requests. For PyTorch MPS/Metal kernel changes, real behavior proof means a perf sweep vs the prior backend plus correctness on-device; tests and CI alone are supplemental.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "pnpm",
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "core_target_overrides": {

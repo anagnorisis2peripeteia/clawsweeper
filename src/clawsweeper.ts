@@ -16005,6 +16005,213 @@ function planCommand(args: Args): void {
   );
 }
 
+// --- Multi-engine structured review (engines drive the FULL review) ---------
+// The codex path (runCodex) gets a schema-valid Decision via codex's native
+// `--output-schema`. Other CLIs have no structured-output flag, so we embed the
+// decision schema in the prompt, drive the CLI through the shared runCodexProcess
+// primitive, extract the JSON object, and validate it with parseDecision —
+// re-asking on invalid JSON. Frontier engines (agy-claude, codex) are
+// authoritative; small local engines (opencode/qwen) are best-effort.
+const REVIEW_ENGINES = [
+  "codex",
+  "claude",
+  "agy-claude",
+  "agy-gemini",
+  "cursor",
+  "opencode",
+] as const;
+type ReviewEngine = (typeof REVIEW_ENGINES)[number];
+
+const AGY_REVIEW_CLAUDE_MODEL = "Claude Opus 4.6 (Thinking)";
+const AGY_REVIEW_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
+const CURSOR_REVIEW_MODEL = "auto";
+
+function isReviewEngine(value: string): value is ReviewEngine {
+  return (REVIEW_ENGINES as readonly string[]).includes(value);
+}
+
+function engineModelFor(engine: ReviewEngine, override: string): string {
+  if (override) return override;
+  switch (engine) {
+    case "agy-claude":
+      return AGY_REVIEW_CLAUDE_MODEL;
+    case "agy-gemini":
+      return AGY_REVIEW_GEMINI_MODEL;
+    case "cursor":
+      return CURSOR_REVIEW_MODEL;
+    default:
+      return "";
+  }
+}
+
+function structuredReviewInstruction(schemaText: string, priorError?: string): string {
+  const retry = priorError
+    ? `\n\nIMPORTANT: your previous response was rejected because: ${priorError}\nReturn corrected JSON only.`
+    : "";
+  return `\n\n## Required output format (STRICT)\nDo not post any GitHub comment or run any write command. Respond with ONLY one JSON object that validates against the JSON Schema below. Output nothing else — no prose, no explanation, no markdown code fences. The first character of your response must be "{" and the last must be "}". Include every required property with a valid value.\n\nJSON Schema:\n${schemaText}${retry}`;
+}
+
+function extractJsonObject(stdout: string): string {
+  let text = stdout.trim();
+  const fence = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
+  if (fence?.[1]) text = fence[1].trim();
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end === -1 || end < start) {
+    throw new Error("model output contained no JSON object");
+  }
+  return text.slice(start, end + 1);
+}
+
+function engineSpawnSpec(
+  engine: ReviewEngine,
+  model: string,
+  openclawDir: string,
+  prompt: string,
+  workDir: string,
+  remainingMs: number,
+): { command: string; args: string[]; input: string } {
+  switch (engine) {
+    case "claude":
+      return {
+        command: "claude",
+        args: ["-p", "--output-format", "text", "--allowedTools", "Read,Grep,Glob"],
+        input: prompt,
+      };
+    case "cursor":
+      return {
+        command: "agent",
+        args: ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--model", model],
+        input: prompt,
+      };
+    case "agy-claude":
+    case "agy-gemini":
+      // agy 1.0.10: the prompt is the VALUE of --print (no stdin path).
+      return {
+        command: "agy",
+        args: [
+          "--model",
+          model,
+          "--print-timeout",
+          `${Math.max(1, Math.ceil(remainingMs / 1000))}s`,
+          "--log-file",
+          join(workDir, `${engine}.log`),
+          "--sandbox",
+          "--print",
+          prompt,
+        ],
+        input: "",
+      };
+    case "opencode":
+      // `opencode run [-m MODEL] --agent plan --dir DIR -- PROMPT`; trailing `--`
+      // so a `---`/`+++` diff line is never parsed as a flag.
+      return {
+        command: "opencode",
+        args: [
+          "run",
+          ...(model ? ["-m", model] : []),
+          "--agent",
+          "plan",
+          "--dir",
+          openclawDir,
+          "--",
+          prompt,
+        ],
+        input: "",
+      };
+    default:
+      throw new Error(`engineSpawnSpec: unsupported engine ${engine}`);
+  }
+}
+
+// Drive a non-codex CLI to produce a schema-valid Decision. Embeds the decision
+// schema in the prompt (CLIs have no `--output-schema`), extracts the JSON object
+// from stdout, validates via parseDecision, and re-asks on invalid output.
+function runReviewWithEngine(options: {
+  engine: ReviewEngine;
+  item: Item;
+  model: string;
+  openclawDir: string;
+  basePrompt: string;
+  timeoutMs: number;
+  workDir: string;
+  quietLogs?: boolean;
+}): Decision {
+  ensureDir(options.workDir);
+  const schemaText = reviewDecisionSchemaText();
+  const configuredAttempts = Number(process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS ?? 3);
+  const maxAttempts = Math.min(
+    5,
+    Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
+  );
+  const startedAt = Date.now();
+  let priorError: string | undefined;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const remainingMs = options.timeoutMs - (Date.now() - startedAt);
+    if (remainingMs <= 0) {
+      throw new CodexReviewError({
+        message: `${options.engine} review timed out for #${options.item.number} after ${options.timeoutMs}ms.`,
+        status: null,
+        retryable: false,
+      });
+    }
+    const fullPrompt = options.basePrompt + structuredReviewInstruction(schemaText, priorError);
+    const { command, args, input } = engineSpawnSpec(
+      options.engine,
+      options.model,
+      options.openclawDir,
+      fullPrompt,
+      options.workDir,
+      remainingMs,
+    );
+    const stdoutPath = join(
+      options.workDir,
+      `${options.item.number}.${attempt}.${options.engine}.stdout.log`,
+    );
+    const stderrPath = join(
+      options.workDir,
+      `${options.item.number}.${attempt}.${options.engine}.stderr.log`,
+    );
+    const result = runCodexProcess({
+      command,
+      args,
+      cwd: options.openclawDir,
+      env: codexEnv(),
+      input,
+      timeoutMs: remainingMs,
+      stdoutPath,
+      stderrPath,
+    });
+    const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+    if (result.error || result.status !== 0) {
+      priorError = `process exit ${result.status ?? "unknown"}: ${
+        redactedOutputTail(result.stderr) || redactedOutputTail(stdout) || "no output"
+      }`;
+      if (!options.quietLogs) {
+        console.error(
+          `[review] ${new Date().toISOString()} ${options.engine}-process-failed #${options.item.number} attempt=${attempt} ${priorError}`,
+        );
+      }
+      continue;
+    }
+    try {
+      return parseDecision(JSON.parse(extractJsonObject(stdout)), options.item);
+    } catch (error) {
+      priorError = error instanceof Error ? error.message : String(error);
+      if (!options.quietLogs) {
+        console.error(
+          `[review] ${new Date().toISOString()} ${options.engine}-invalid-decision #${options.item.number} attempt=${attempt} ${priorError}`,
+        );
+      }
+    }
+  }
+  throw new CodexReviewError({
+    message: `${options.engine} review did not produce schema-valid JSON for #${options.item.number} after ${maxAttempts} attempts: ${priorError ?? "unknown error"}`,
+    status: null,
+    retryable: false,
+  });
+}
+
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
   const localOnly = boolArg(args.local_only);
@@ -16042,6 +16249,12 @@ function reviewCommand(args: Args): void {
   const reasoningEffort = stringArg(args.codex_reasoning_effort, DEFAULT_REASONING_EFFORT);
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
+  const engineArg = stringArg(args.engine, "codex");
+  if (!isReviewEngine(engineArg)) {
+    throw new Error(`--engine must be one of ${REVIEW_ENGINES.join(", ")} (got "${engineArg}")`);
+  }
+  const engine: ReviewEngine = engineArg;
+  const engineModel = engineModelFor(engine, stringArg(args.engine_model, ""));
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
   const additionalPrompt = stringArg(
     args.additional_prompt,
@@ -16159,25 +16372,37 @@ function reviewCommand(args: Args): void {
             `  stderr: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stderr.log`))}`,
           );
         }
-        decision = runCodex({
-          item,
-          context,
-          git,
-          model,
-          openclawDir,
-          reasoningEffort,
-          sandboxMode,
-          serviceTier,
-          forcedLoginMethod,
-          preserveCodexAuth: localOnly,
-          preferWindowsAppBinary: localOnly,
-          timeoutMs,
-          workDir: codexWorkDir,
-          additionalPrompt,
-          proofScratchDir,
-          prompt: prompt.text,
-          quietLogs: humanLocalReview,
-        });
+        decision =
+          engine === "codex"
+            ? runCodex({
+                item,
+                context,
+                git,
+                model,
+                openclawDir,
+                reasoningEffort,
+                sandboxMode,
+                serviceTier,
+                forcedLoginMethod,
+                preserveCodexAuth: localOnly,
+                preferWindowsAppBinary: localOnly,
+                timeoutMs,
+                workDir: codexWorkDir,
+                additionalPrompt,
+                proofScratchDir,
+                prompt: prompt.text,
+                quietLogs: humanLocalReview,
+              })
+            : runReviewWithEngine({
+                engine,
+                item,
+                model: engineModel,
+                openclawDir,
+                basePrompt: prompt.text,
+                timeoutMs,
+                workDir: codexWorkDir,
+                quietLogs: humanLocalReview,
+              });
       } catch (error) {
         codexFailures += 1;
         codexFailed = true;

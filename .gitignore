@@ -15,3 +15,5 @@ jobs/
 records/
 results/
 triage-dashboard-dev*.log
+node_modules
+.engine-test/
