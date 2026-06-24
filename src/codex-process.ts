@@ -80,7 +80,7 @@ export function runCodexProcess(options: {
   stderrPath?: string;
   appServer?: CodexAppServerProcessOptions;
   /** Override the spawned binary (defaults to codex) so the same bounded runner
-   * can drive another fixed review CLI, e.g. `claude`. */
+   * can drive another fixed review CLI, e.g. `claude`, `agy`, `agent`, `opencode`. */
   command?: string;
 }): CodexProcessResult {
   const workDir = mkdtempSync(join(tmpdir(), "clawsweeper-codex-process-"));
