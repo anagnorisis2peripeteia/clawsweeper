@@ -1,0 +1,18 @@
+Local ClawSweeper review for openclaw/clawsweeper#342
+
+Preparing target checkout
+  mode: supplied checkout
+  path: /Users/cameronbeeley/clawsweeper
+  base: main
+
+Loading review item
+  item: PR #342
+  title: [codex] improve ClawHub diversion handoff
+  state: open
+
+Collecting GitHub context
+
+Running Codex review
+  timeout: 360m 0s
+  stdout: .engine-test/342/agy-untimed/codex/342.1.codex.stdout.log
+  stderr: .engine-test/342/agy-untimed/codex/342.1.codex.stderr.log

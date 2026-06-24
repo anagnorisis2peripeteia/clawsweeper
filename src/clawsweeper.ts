@@ -16008,6 +16008,74 @@ function planCommand(args: Args): void {
   );
 }
 
+// Offline local-range review: synthesize the Item + ItemContext from the local
+// git range (merge-base(base, HEAD)..HEAD) so the FULL review (real-behavior
+// proof + mantis decision) can run BEFORE a PR exists — the "advisory review
+// before submission" #357 describes but gates behind an already-open PR. No
+// GitHub fetch: the diff comes from `git diff`, the body from the commit message
+// (or --body-file), so it works offline on a fork checkout.
+function buildLocalRangeReview(
+  targetDir: string,
+  repo: string,
+  baseRef: string,
+): { item: Item; context: ItemContext; baseSha: string } {
+  const base = baseRef || "origin/main";
+  const headSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
+  const baseSha = run("git", ["merge-base", base, "HEAD"], { cwd: targetDir }).trim();
+  if (!baseSha || baseSha === headSha) {
+    throw new UserFacingCommandError(
+      `No local-range review: HEAD has no commits beyond ${base} in ${targetDir}.`,
+    );
+  }
+  const gitField = (format: string): string =>
+    run("git", ["log", "-1", `--format=${format}`, headSha], { cwd: targetDir }).trim();
+  const title = gitField("%s") || `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`;
+  const bodyText = gitField("%b");
+  const author = gitField("%an") || "local";
+  const committedAt = gitField("%cI") || "1970-01-01T00:00:00Z";
+  const nameStatus = run("git", ["diff", "--name-status", `${baseSha}..${headSha}`], {
+    cwd: targetDir,
+  }).trim();
+  const pullFiles = nameStatus
+    ? nameStatus.split("\n").map((line) => {
+        const tab = line.indexOf("\t");
+        const status = tab >= 0 ? line.slice(0, tab) : line;
+        const filename = tab >= 0 ? line.slice(tab + 1) : line;
+        const patch = run("git", ["diff", `${baseSha}..${headSha}`, "--", filename], {
+          cwd: targetDir,
+        });
+        return { filename, status, patch: truncateText(patch, 8000) };
+      })
+    : [];
+  const item: Item = {
+    repo,
+    number: 0,
+    kind: "pull_request",
+    title,
+    url: `local:${headSha}`,
+    createdAt: committedAt,
+    updatedAt: committedAt,
+    author,
+    authorAssociation: "OWNER",
+    labels: [],
+  };
+  const context: ItemContext = {
+    issue: {
+      number: 0,
+      title,
+      body: bodyText,
+      state: "open",
+      user: { login: author },
+      html_url: item.url,
+    },
+    comments: [],
+    timeline: [],
+    pullFiles,
+    counts: { comments: 0, timeline: 0, pullFiles: pullFiles.length },
+  };
+  return { item, context, baseSha };
+}
+
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
   const localOnly = boolArg(args.local_only);
@@ -16067,16 +16135,22 @@ function reviewCommand(args: Args): void {
     const providedBody = readFileSync(bodyFile, "utf8");
     additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
   }
+  const localRange = boolArg(args.local_range);
+  const localRangeData = localRange
+    ? buildLocalRangeReview(openclawDir, targetRepo(), stringArg(args.base, ""))
+    : undefined;
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
   const hotIntake = boolArg(args.hot_intake);
   const readonlyOpenclaw = boolArg(args.readonly_openclaw);
-  const skipStartComment = boolArg(args.skip_start_comment) || localOnly;
+  const skipStartComment = boolArg(args.skip_start_comment) || localOnly || localRange;
   const forcedLoginMethod = reviewCodexForcedLoginMethod(args);
   ensureDir(artifactDir);
-  const git = checkout.gitTargetBranch
-    ? gitInfo(openclawDir, { targetBranch: checkout.gitTargetBranch })
-    : gitInfo(openclawDir);
+  const git: GitInfo = localRangeData
+    ? { mainSha: localRangeData.baseSha, latestRelease: null }
+    : checkout.gitTargetBranch
+      ? gitInfo(openclawDir, { targetBranch: checkout.gitTargetBranch })
+      : gitInfo(openclawDir);
   const reviewPolicy = reviewPolicyHash({ model, reasoningEffort, sandboxMode, serviceTier });
   const readonlyModeSnapshots = readonlyOpenclaw ? makeTreeReadOnly(openclawDir) : [];
   try {
@@ -16096,7 +16170,9 @@ function reviewCommand(args: Args): void {
       console.error("");
       console.error("Loading review item");
     }
-    const { candidates, scannedPages } = selectCandidates(selectionOptions);
+    const { candidates, scannedPages } = localRangeData
+      ? { candidates: [localRangeData.item], scannedPages: 0 }
+      : selectCandidates(selectionOptions);
     if (humanLocalReview) {
       if (candidates.length === 0) throw exactLocalReviewNoCandidateError(itemNumber, shardIndex);
       const item = candidates[0]!;
@@ -16125,7 +16201,7 @@ function reviewCommand(args: Args): void {
         );
       }
       const contextStartedAt = Date.now();
-      const context = collectItemContext(item);
+      const context = localRangeData ? localRangeData.context : collectItemContext(item);
       const contextElapsedMs = Date.now() - contextStartedAt;
       const codexWorkDir = join(artifactDir, "codex");
       const proofScratchDir = join(codexWorkDir, "proof-scratch", String(item.number));

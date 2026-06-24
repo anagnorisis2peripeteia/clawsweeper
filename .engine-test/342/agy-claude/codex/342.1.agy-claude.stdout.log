@@ -1,0 +1,4 @@
+Now let me check the current main state of the affected files, the PR diff area, and git history for likely owners.
+Good. Now let me check if the `closeClawHubHandoffBlock` function is used anywhere, look at how it integrates, and inspect the full prompt diff more carefully.
+So on current `main`, the `closeClawHubHandoffBlock` function does not exist, and the close outro still says "installable community skill." The PR adds a new function and changes the wording. Let me now look at where the close comment is assembled to understand how the new function would integrate:
+Error: timed out waiting for response

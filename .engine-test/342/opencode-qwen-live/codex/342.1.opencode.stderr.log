@@ -1,0 +1,113 @@
+[0m
+> plan · h100/qwen3-coder:latest
+[0m
+[0m→ [0mRead prompts/review-item.md
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=100, offset=8670][0m
+[0m→ [0mRead test/clawsweeper.test.ts[90m [offset=815, limit=30][0m
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8670, limit=50][0m
+[0m→ [0mRead prompts/review-item.md[90m [offset=400, limit=20][0m
+[0m→ [0mRead test/clawsweeper.test.ts[90m [offset=800, limit=50][0m
+[0m✱ [0mGrep "function closeOutro|function closeClawHubHandoffBlock"[90m in src · 1 match[0m
+[0m→ [0mRead prompts/review-item.md[90m [offset=400, limit=20][0m
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8932, limit=100][0m
+[0m✱ [0mGrep "reviewActionForDecision"[90m in . · 2 matches[0m
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=200, offset=15368][0m
+[0m✱ [0mGrep "function normalizeComment"[90m 1 match[0m
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=300, offset=14126][0m
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=150, offset=14550][0m
+[0m✱ [0mGrep "^function renderCloseComment\("[90m in src/clawsweeper.ts · 2 matches[0m
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=150, offset=14006][0m
+[0m✱ [0mGrep "^function closeIntro\("[90m in src/clawsweeper.ts · 1 match[0m
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8905, limit=50][0m
+[0m→ [0mRead test/clawsweeper.test.ts[90m [limit=80, offset=780][0m
+[0m→ [0mRead test/review-prompt-policy.test.ts[90m [limit=150][0m
+[0m→ [0mRead test/review-prompt-policy.test.ts[90m [limit=50, offset=150][0m
+[0m→ [0mRead test/review-prompt-policy.test.ts[90m [limit=200, offset=200][0m
+[0m→ [0mRead test/review-prompt-policy.test.ts[90m [offset=400, limit=100][0m
+[0m✱ [0mGrep "ClawHub handoff"[90m in . · 0 matches[0m
+[0m→ [0mRead src/clawsweeper.ts[90m [limit=50, offset=8686][0m
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git log --oneline --all -20
+9b9f4cff94 Merge branch 'engines-drive-review' into cli-engines
+a239d85019 feat(review): drive the full review with any engine (agy/cursor/opencode), not just codex
+f92fbfebbe fix(ci): raise exact-review admission caps
+68a0ffc770 ci: run github activity on hosted runners
+79e7688442 Add local-only issue and PR review mode (#357)
+ecbfc4fbfe perf(queue): raise exact-review target ramp
+16a23a21d0 fix(local-review): agy-claude default = Claude Opus 4.6 (Thinking)
+de855ded91 fix(local-review): agy lane passes the prompt as the --print value, not stdin
+610acaceed fix(local-review): cap opencode diff at 24 KiB on Windows (CreateProcessW limit)
+bd03fe34c0 perf(queue): reserve four global exact-review slots
+65e3925771 refactor(local-review): make the opencode engine provider-neutral
+59f4d6981e perf(queue): raise exact-review capacity to eight
+a398ccf228 feat(local-review): add opencode-qwen and opencode-gemma local engines
+cb7ae4f9b4 feat(local-review): multi-engine selection + read-only agy/cursor engines
+714fc40cec feat(local-review): add agy-claude, agy-gemini, and cursor review engines
+54eedf8011 fix(queue): use available exact-review capacity per target (#354)
+b602a8d6af fix(queue): self-heal exact review alarms (#353)
+768e8accce docs(scheduler): update capacity wave references
+fc3050506f fix(dashboard): align exact review capacity
+680f4fdbc3 fix(limits): align review defaults with reserved capacity
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git log --oneline --all -50 | grep -i clawhub
+bca188259c improve clawhub diversion handoff
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git log --oneline --all -100 | head -20
+9b9f4cff94 Merge branch 'engines-drive-review' into cli-engines
+a239d85019 feat(review): drive the full review with any engine (agy/cursor/opencode), not just codex
+f92fbfebbe fix(ci): raise exact-review admission caps
+68a0ffc770 ci: run github activity on hosted runners
+79e7688442 Add local-only issue and PR review mode (#357)
+ecbfc4fbfe perf(queue): raise exact-review target ramp
+16a23a21d0 fix(local-review): agy-claude default = Claude Opus 4.6 (Thinking)
+de855ded91 fix(local-review): agy lane passes the prompt as the --print value, not stdin
+610acaceed fix(local-review): cap opencode diff at 24 KiB on Windows (CreateProcessW limit)
+bd03fe34c0 perf(queue): reserve four global exact-review slots
+65e3925771 refactor(local-review): make the opencode engine provider-neutral
+59f4d6981e perf(queue): raise exact-review capacity to eight
+a398ccf228 feat(local-review): add opencode-qwen and opencode-gemma local engines
+cb7ae4f9b4 feat(local-review): multi-engine selection + read-only agy/cursor engines
+714fc40cec feat(local-review): add agy-claude, agy-gemini, and cursor review engines
+54eedf8011 fix(queue): use available exact-review capacity per target (#354)
+b602a8d6af fix(queue): self-heal exact review alarms (#353)
+768e8accce docs(scheduler): update capacity wave references
+fc3050506f fix(dashboard): align exact review capacity
+680f4fdbc3 fix(limits): align review defaults with reserved capacity
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git log --oneline --all | grep -i "clawhub\|community" | head -20
+bca188259c improve clawhub diversion handoff
+025827dab9 repair: stop ClawHub automerge from preflighting on stale pnpm check:changed
+dca9feb029 fix: route bundled skills to ClawHub
+53c6114063 ci: skip disabled clawhub dispatches
+bf75f42747 ci: skip disabled clawhub schedules
+01dd71bde9 chore: apply event sweep result for openclaw-clawhub#1900
+9b20db1637 chore: apply event sweep result for openclaw-clawhub#1898
+877f7657a2 chore: apply event sweep result for openclaw-clawhub#1899
+81c7e514fc chore: apply event sweep result for openclaw-clawhub#1897
+6e427f614a chore: apply event sweep result for openclaw-clawhub#1854
+0197883a25 chore: apply event sweep result for openclaw-clawhub#1840
+c2454ce72e chore: apply event sweep result for openclaw-clawhub#1854
+ed83394aba chore: apply event sweep result for openclaw-clawhub#1896
+88cbc1e7a7 chore: apply event sweep result for openclaw-clawhub#1895
+0af5e8e890 chore: apply event sweep result for openclaw-clawhub#1894
+be463043e8 chore: apply event sweep result for openclaw-clawhub#1893
+8133cc78a0 chore: apply event sweep result for openclaw-clawhub#1892
+51f9020acf chore: apply event sweep result for openclaw-clawhub#1891
+b68f590439 chore: apply event sweep result for openclaw-clawhub#1891
+b4afc17414 chore: apply event sweep result for openclaw-clawhub#1169
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git show dca9feb029 --stat
+commit dca9feb029ea0cbeb654b1ed3a4cb9409f77a1a8
+Author: Peter Steinberger <steipete@gmail.com>
+Date:   Wed May 6 07:49:12 2026 +0100
+
+    fix: route bundled skills to ClawHub
+
+ CHANGELOG.md                            |  2 ++
+ prompts/review-item.md                  |  8 +++---
+ schema/clawsweeper-decision.schema.json |  3 ++-
+ src/clawsweeper.ts                      |  6 +++--
+ test/clawsweeper.test.ts                | 47 +++++++++++++++++++++++++++++++++
+ 5 files changed, 60 insertions(+), 6 deletions(-)
+[0m
+[0m→ [0mRead AGENTS.md

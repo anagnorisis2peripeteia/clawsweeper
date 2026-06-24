@@ -1,0 +1,9 @@
+Local ClawSweeper review for openclaw/clawsweeper#329
+
+Preparing target checkout
+  mode: supplied checkout
+  path: /Users/cameronbeeley/clawsweeper
+  base: main
+
+Loading review item
+Error: No review was run for openclaw/clawsweeper#329 because GitHub reports this PR is closed. Local exact review only reviews open items.

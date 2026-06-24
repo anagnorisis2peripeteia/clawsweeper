@@ -1,0 +1,207 @@
+I'll analyze this PR to determine the appropriate review decision.
+I'll read the current main version of the relevant code to verify the PR changes.
+Let me search for the current implementation of the close functions to understand the base code:
+Now let me check the reviewActionForDecision function to understand how close comments are constructed:
+Let me search for the normalizeComment function that constructs the actual close comment:
+Let me search for the renderCloseComment function:
+Let me search for the renderCloseComment function definition:
+Now let me search for the closeIntro function:
+Now I understand the current implementation. Let me check what tests exist for the clawhub close behavior:
+Now let me check the test file for the review-prompt-policy tests:
+Let me check if there's a test for the ClawHub handoff:
+Let me read the rest of the review-prompt-policy.test.ts to see if there's a test for ClawHub handoff:
+Let me check the rest of the file to see if there's a test for ClawHub handoff:
+Now let me check if there's a test for ClawHub handoff in the review-prompt-policy.test.ts file. Let me search for it:
+Let me check the PR diff again to understand what changes are being made. Based on the GitHub context, I can see the PR modifies:
+
+1. `prompts/review-item.md` - adds guidance about ClawHub handoff
+2. `src/clawsweeper.ts` - adds `closeClawHubHandoffBlock` function and updates the close outro
+3. `test/clawsweeper.test.ts` - updates test assertions to match new output
+4. `test/review-prompt-policy.test.ts` - adds test for ClawHub handoff
+
+The PR is proposing to add a "ClawHub handoff" block to close comments for clawhub closes. Looking at the PR description and the rendered output, the change is to improve the ClawHub diversion handoff by adding more practical next steps for contributors.
+
+Now let me make my review decision:
+Let me check the git log to understand the history of the relevant code:
+Now I understand the context. The PR is improving the ClawHub diversion handoff by adding more detailed guidance to the close comment. Let me now analyze the PR and make my decision.
+
+Based on my review:
+
+1. **PR Purpose**: The PR improves the ClawHub close path by adding a "ClawHub handoff" block with more practical next steps for contributors when their PR/issue is better suited for ClawHub rather than OpenClaw core.
+
+2. **Changes Made**:
+   - Updated `prompts/review-item.md` to guide reviewers to include ClawHub handoff details
+   - Added `closeClawHubHandoffBlock()` function in `src/clawsweeper.ts` to generate the handoff block
+   - Updated the `clawhub` close outro to mention "ClawHub package" instead of "community skill"
+   - Updated tests to verify the new output
+
+3. **Current State**: The current main has the basic ClawHub close functionality but lacks the detailed handoff block with practical next steps.
+
+4. **Assessment**: This PR is a clear improvement that makes the ClawHub diversion more useful for contributors by providing concrete next steps. The changes are:
+   - Well-scoped and focused
+   - Properly tested
+   - Consistent with the existing ClawHub policy
+   - No security concerns
+   - No breaking changes
+
+5. **Decision**: The PR should be kept open for maintainer review. While the changes are good, this is a policy/process improvement that affects the public-facing review comments, so it needs explicit maintainer approval before merge.
+Based on my review of the PR and the repository's AGENTS.md, I now have all the information needed to make my decision.
+
+```json
+{
+  "decision": "keep_open",
+  "closeReason": "none",
+  "confidence": "high",
+  "summary": "This PR improves ClawSweeper's ClawHub diversion by adding a detailed handoff block with practical next steps for contributors. The changes are well-scoped, properly tested, and align with the repository's goal of keeping core lean while making ClawHub a clear path for optional extensions. However, as a policy/process improvement affecting public-facing review comments, it requires explicit maintainer approval before merge.",
+  "changeSummary": "Adds a deterministic ClawHub handoff block to clawhub close comments with package scope guidance, manifest/checklist basics, and explicit self-serve boundaries.",
+  "evidence": [
+    {
+      "label": "Source code change",
+      "detail": "The PR adds closeClawHubHandoffBlock() function in src/clawsweeper.ts:8698-8708 and updates the clawhub close outro to mention 'ClawHub package' instead of 'community skill'.",
+      "file": "src/clawsweeper.ts",
+      "line": 8698,
+      "command": "git diff bca188259c830272290601fbeb4533a12c3f4100~1 bca188259c830272290601fbeb4533a12c3f4100 -- src/clawsweeper.ts",
+      "sha": "bca188259c830272290601fbeb4533a12c3f4100"
+    },
+    {
+      "label": "Prompt guidance update",
+      "detail": "The PR updates prompts/review-item.md:409 to guide reviewers to include ClawHub handoff details for self-serve package handoffs.",
+      "file": "prompts/review-item.md",
+      "line": 409,
+      "command": "git diff bca188259c830272290601fbeb4533a12c3f4100~1 bca188259c830272290601fbeb4533a12c3f4100 -- prompts/review-item.md",
+      "sha": "bca188259c830272290601fbeb4533a12c3f4100"
+    },
+    {
+      "label": "Test coverage",
+      "detail": "The PR adds review-prompt-policy.test.ts test for ClawHub handoff and updates clawsweeper.test.ts assertions to verify the new output includes handoff block elements.",
+      "file": "test/review-prompt-policy.test.ts",
+      "line": 132,
+      "command": "git diff bca188259c830272290601fbeb4533a12c3f4100~1 bca188259c830272290601fbeb4533a12c3f4100 -- test/review-prompt-policy.test.ts",
+      "sha": "bca188259c830272290601fbeb4533a12c3f4100"
+    }
+  ],
+  "likelyOwners": [
+    {
+      "person": "brokemac79",
+      "role": "PR author",
+      "reason": "Authored this PR improving ClawHub diversion handoff.",
+      "commits": ["bca188259c830272290601fbeb4533a12c3f4100"],
+      "files": ["src/clawsweeper.ts", "prompts/review-item.md", "test/clawsweeper.test.ts", "test/review-prompt-policy.test.ts"],
+      "confidence": "high"
+    },
+    {
+      "person": "steipete",
+      "role": "recent area contributor",
+      "reason": "Previously committed to ClawHub routing (dca9feb029) and maintains the review policy.",
+      "commits": ["dca9feb029ea0cbeb654b1ed3a4cb9409f77a1a8"],
+      "files": ["src/clawsweeper.ts", "prompts/review-item.md"],
+      "confidence": "medium"
+    }
+  ],
+  "risks": [
+    "This PR changes the public-facing review comment text for clawhub closes. While the change improves clarity for contributors, maintainers should review the new wording before it becomes the standard close comment.",
+    "The PR updates the review prompt guidance. If maintainers have different preferences for how ClawHub handoffs should be phrased, they should provide input before merge."
+  ],
+  "bestSolution": "Merge this PR after maintainer review to improve the ClawHub diversion experience. The changes make the close comment more helpful for contributors by providing concrete next steps for packaging their work as a ClawHub skill/plugin/provider/channel/bundle/MCP integration.",
+  "triagePriority": "P3",
+  "impactLabels": [],
+  "mergeRiskLabels": [],
+  "mergeRiskOptions": [],
+  "reviewMetrics": [
+    {
+      "label": "Files changed",
+      "value": "4 files changed, 31 additions, 2 deletions",
+      "reason": "Narrow scope affecting review policy, source code, and tests."
+    },
+    {
+      "label": "Test coverage",
+      "value": "1 new test added, 1 test updated",
+      "reason": "New review-prompt-policy.test.ts test validates the ClawHub handoff guidance in the prompt."
+    }
+  ],
+  "labelJustifications": [
+    {
+      "label": "P3",
+      "reason": "Low-risk cleanup to review comment policy that improves contributor guidance without breaking existing behavior."
+    }
+  ],
+  "itemCategory": "cleanup",
+  "reproductionStatus": "not_applicable",
+  "reproductionConfidence": "high",
+  "requiresNewFeature": false,
+  "requiresNewConfigOption": false,
+  "requiresProductDecision": false,
+  "reproductionAssessment": "Not applicable - this PR updates review policy and comment text, not a bug fix requiring reproduction.",
+  "solutionAssessment": "Yes - the PR provides the best way to improve ClawHub diversion handoff by adding a structured handoff block with practical next steps for contributors.",
+  "visionFit": "aligned",
+  "visionFitReason": "The PR aligns with VISION.md's guidance that optional integrations/providers/channels/skills should live in ClawHub rather than core, and makes the diversion path clearer for contributors.",
+  "visionFitEvidence": [
+    "prompts/review-item.md:409 guides reviewers to identify likely package shape for clawhub closes",
+    "src/clawsweeper.ts:8698-8708 adds closeClawHubHandoffBlock() for self-serve package handoff",
+    "The PR improves the contributor experience for the ClawHub plugin/community path"
+  ],
+  "implementationComplexity": "not_applicable",
+  "autoImplementationCandidate": "none",
+  "rootCauseCluster": {
+    "confidence": "low",
+    "canonicalRef": null,
+    "currentItemRelationship": "independent",
+    "summary": "No established root-cause cluster with other items.",
+    "members": []
+  },
+  "agentsPolicyStatus": {
+    "found": true,
+    "readFully": true,
+    "applied": true,
+    "status": "found_applied",
+    "summary": "AGENTS.md was found, read fully, and applied to this review. The policy that review lane is proposal-only and apply lane mutates GitHub affected the keep_open decision."
+  },
+  "reviewFindings": [],
+  "securityReview": {
+    "status": "cleared",
+    "summary": "The PR is a review policy improvement with no security or supply-chain concerns.",
+    "concerns": []
+  },
+  "realBehaviorProof": {
+    "status": "not_applicable",
+    "summary": "Real behavior proof is not needed for a review policy improvement.",
+    "evidenceKind": "not_applicable",
+    "needsContributorAction": false
+  },
+  "prRating": {
+    "proofTier": "NA",
+    "patchTier": "A",
+    "overallTier": "A",
+    "summary": "The PR is a well-executed review policy improvement with clear tests and no defects.",
+    "nextSteps": []
+  },
+  "telegramVisibleProof": {
+    "status": "not_needed",
+    "summary": "This PR does not change Telegram behavior."
+  },
+  "mantisRecommendation": {
+    "status": "not_recommended",
+    "scenario": "none",
+    "reason": "This PR changes review policy text, not live transport behavior.",
+    "maintainerComment": ""
+  },
+  "featureShowcase": {
+    "status": "none",
+    "reason": "This is a routine policy improvement, not an unusually compelling feature idea."
+  },
+  "overallCorrectness": "patch is correct",
+  "overallConfidenceScore": 0.95,
+  "fixedRelease": null,
+  "fixedSha": null,
+  "fixedAt": null,
+  "closeComment": "",
+  "workCandidate": "manual_review",
+  "workConfidence": "high",
+  "workPriority": "medium",
+  "workReason": "This PR improves ClawSweeper's ClawHub diversion by adding a detailed handoff block. While the changes are good and well-scoped, they affect public-facing review comments and require explicit maintainer approval before merge.",
+  "workPrompt": "",
+  "workClusterRefs": [],
+  "workValidation": [],
+  "workLikelyFiles": []
+}
+```
