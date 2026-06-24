@@ -1,0 +1,36 @@
+[0m
+> plan · h100/qwen3-coder:latest
+[0m
+[0m→ [0mRead AGENTS.md
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8670, limit=30][0m
+[0m→ [0mRead prompts/review-item.md[90m [offset=400, limit=20][0m
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8670, limit=50][0m
+[0m→ [0mRead test/clawsweeper.test.ts[90m [offset=810, limit=40][0m
+[0m→ [0mRead src/clawsweeper.ts[90m [offset=8685, limit=50][0m
+[0m✱ [0mGrep "closeClawHubHandoffBlock"[90m in . · 0 matches[0m
+[0m→ [0mRead prompts/review-item.md[90m [offset=400, limit=30][0m
+[0m
+[0m$ [0mcd /Users/cameronbeeley/clawsweeper && git log --oneline -20
+16a23a21d0 fix(local-review): agy-claude default = Claude Opus 4.6 (Thinking)
+de855ded91 fix(local-review): agy lane passes the prompt as the --print value, not stdin
+610acaceed fix(local-review): cap opencode diff at 24 KiB on Windows (CreateProcessW limit)
+65e3925771 refactor(local-review): make the opencode engine provider-neutral
+a398ccf228 feat(local-review): add opencode-qwen and opencode-gemma local engines
+cb7ae4f9b4 feat(local-review): multi-engine selection + read-only agy/cursor engines
+54eedf8011 fix(queue): use available exact-review capacity per target (#354)
+b602a8d6af fix(queue): self-heal exact review alarms (#353)
+f94588d89c fix(apply): renew token between closure checkpoints (#352)
+df861c9f65 fix(repair): configure CrabFleet action session owner
+babd6a435a fix(codeql): clean ClawSweeper quality findings
+f69d9debf4 fix(ci): bound ClawSweeper review fanout (#348)
+ab37a53656 fix(repair): settle stale branch pushes before dispatch (#347)
+c66b2dedc6 fix(ci): cap ClawSweeper worker bursts (#346)
+855cffa7c7 docs: align ClawSweeper comment prefilter
+f94c65a91f docs: clarify rate-limit-safe dispatcher setup (#344)
+1566ad6a0a fix(ci): reduce ClawSweeper GitHub API pressure (#343)
+471bf8065d feat(docs): add site dark mode (#322)
+bbdd097161 fix(proof): decouple supplied label from nudges (#319)
+826996f3ed Use public inventory fallback for local fanout (#331)
+[0m
+[0m→ [0mRead test/clawsweeper.test.ts[90m [offset=790, limit=50][0m
+[0m✱ [0mGlob "**/VISION.md"[90m 0 matches[0m
