@@ -125,7 +125,7 @@ test("local-review exposes distinct current engines including AGY, cursor, and o
     "cursor",
     "opencode",
   ]);
-  assert.equal(DEFAULT_AGY_CLAUDE_MODEL, "Claude Sonnet 4.6 (Thinking)");
+  assert.equal(DEFAULT_AGY_CLAUDE_MODEL, "Claude Opus 4.6 (Thinking)");
   assert.equal(DEFAULT_AGY_GEMINI_MODEL, "Gemini 3.1 Pro (High)");
   assert.equal(DEFAULT_CURSOR_MODEL, "auto");
 });

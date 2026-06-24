@@ -32,6 +32,7 @@ import {
   redactInternalCodexModel,
 } from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
+import { engineUsageStatus, recordEngineExhausted } from "./engine-usage.js";
 import {
   codexJsonlFailureDetail,
   codexRetryDelayMs,
@@ -16033,6 +16034,9 @@ function isReviewEngine(value: string): value is ReviewEngine {
   return (REVIEW_ENGINES as readonly string[]).includes(value);
 }
 
+// The opencode/qwen H100 endpoint is the always-available local floor of the cascade.
+const OPENCODE_FLOOR_MODEL = "local/h100/qwen3-coder:latest";
+
 function engineModelFor(engine: ReviewEngine, override: string): string {
   if (override) return override;
   switch (engine) {
@@ -16042,9 +16046,33 @@ function engineModelFor(engine: ReviewEngine, override: string): string {
       return AGY_REVIEW_GEMINI_MODEL;
     case "cursor":
       return CURSOR_REVIEW_MODEL;
+    case "opencode":
+      return OPENCODE_FLOOR_MODEL;
     default:
       return "";
   }
+}
+
+// Usage-aware cascade order: the requested engine first, then the local opencode
+// floor (no quota). `auto` walks frontier → floor. The pre-check skips any engine
+// the usage ledger marks maxed-until-future; a quota error at runtime is recorded
+// and falls through to the next.
+type CascadeEngine = ReviewEngine | "auto";
+function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
+  // `auto` is the opt-in usage-aware cascade. `codex` (the default) and `opencode`
+  // stay single-engine for backward-compat — no surprise fallthrough. Other explicit
+  // engines fall back to the opencode/qwen-local floor on a quota error.
+  if (requested === "auto") return ["codex", "agy-claude", "opencode"];
+  if (requested === "codex" || requested === "opencode") return [requested];
+  return [requested, "opencode"];
+}
+
+// agy writes its quota error (RESOURCE_EXHAUSTED 429) to its --log-file, not
+// stdout/stderr, so the thrown message can miss it — read the log too.
+function readEngineQuotaLog(workDir: string, engine: string): string {
+  if (!engine.startsWith("agy")) return "";
+  const path = join(workDir, `${engine}.log`);
+  return existsSync(path) ? readFileSync(path, "utf8").slice(-4000) : "";
 }
 
 function structuredReviewInstruction(schemaText: string, priorError?: string): string {
@@ -16329,11 +16357,13 @@ function reviewCommand(args: Args): void {
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const engineArg = stringArg(args.engine, "codex");
-  if (!isReviewEngine(engineArg)) {
-    throw new Error(`--engine must be one of ${REVIEW_ENGINES.join(", ")} (got "${engineArg}")`);
+  if (engineArg !== "auto" && !isReviewEngine(engineArg)) {
+    throw new Error(
+      `--engine must be "auto" or one of ${REVIEW_ENGINES.join(", ")} (got "${engineArg}")`,
+    );
   }
-  const engine: ReviewEngine = engineArg;
-  const engineModel = engineModelFor(engine, stringArg(args.engine_model, ""));
+  const engine: CascadeEngine = engineArg as CascadeEngine;
+  const engineModelOverride = stringArg(args.engine_model, "");
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
   let additionalPrompt = stringArg(
     args.additional_prompt,
@@ -16477,37 +16507,73 @@ function reviewCommand(args: Args): void {
             `  stderr: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stderr.log`))}`,
           );
         }
-        decision =
-          engine === "codex"
-            ? runCodex({
+        decision = ((): Decision => {
+          const cascade = reviewEngineCascadeOrder(engine);
+          const notes: string[] = [];
+          for (let i = 0; i < cascade.length; i += 1) {
+            const eng = cascade[i]!;
+            const nowMs = Date.now();
+            // Pre-check the ledger (opencode/qwen-local has no quota — always eligible).
+            if (eng !== "opencode") {
+              const status = engineUsageStatus(eng, nowMs);
+              if (status.maxed) {
+                if (!humanLocalReview)
+                  console.error(
+                    `[review] engine ${eng} skipped — usage-maxed until ${status.until} (ledger)`,
+                  );
+                notes.push(`${eng}: skipped (maxed until ${status.until})`);
+                continue;
+              }
+            }
+            try {
+              if (eng === "codex") {
+                return runCodex({
+                  item,
+                  context,
+                  git,
+                  model,
+                  openclawDir,
+                  reasoningEffort,
+                  sandboxMode,
+                  serviceTier,
+                  forcedLoginMethod,
+                  preserveCodexAuth: localOnly,
+                  preferWindowsAppBinary: localOnly,
+                  timeoutMs,
+                  workDir: codexWorkDir,
+                  additionalPrompt,
+                  proofScratchDir,
+                  prompt: prompt.text,
+                  quietLogs: humanLocalReview,
+                });
+              }
+              return runReviewWithEngine({
+                engine: eng,
                 item,
-                context,
-                git,
-                model,
-                openclawDir,
-                reasoningEffort,
-                sandboxMode,
-                serviceTier,
-                forcedLoginMethod,
-                preserveCodexAuth: localOnly,
-                preferWindowsAppBinary: localOnly,
-                timeoutMs,
-                workDir: codexWorkDir,
-                additionalPrompt,
-                proofScratchDir,
-                prompt: prompt.text,
-                quietLogs: humanLocalReview,
-              })
-            : runReviewWithEngine({
-                engine,
-                item,
-                model: engineModel,
+                model: engineModelFor(eng, eng === engine ? engineModelOverride : ""),
                 openclawDir,
                 basePrompt: prompt.text,
                 timeoutMs,
                 workDir: codexWorkDir,
                 quietLogs: humanLocalReview,
               });
+            } catch (engineError) {
+              const output = `${engineError instanceof Error ? engineError.message : String(engineError)}\n${readEngineQuotaLog(codexWorkDir, eng)}`;
+              // Only USAGE exhaustion cascades. Any other failure fails normally, so a
+              // real codex/agy error is never silently routed to a weaker engine.
+              if (!recordEngineExhausted(eng, output, nowMs)) throw engineError;
+              notes.push(`${eng}: usage-exhausted (recorded)`);
+              if (!humanLocalReview)
+                console.error(`[review] engine ${eng} usage-exhausted — recorded, falling through`);
+              if (i === cascade.length - 1) throw engineError;
+            }
+          }
+          throw new CodexReviewError({
+            message: `all review engines exhausted/failed: ${notes.join("; ")}`,
+            status: null,
+            retryable: false,
+          });
+        })();
       } catch (error) {
         codexFailures += 1;
         codexFailed = true;
