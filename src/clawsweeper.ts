@@ -16283,6 +16283,14 @@ function buildLocalRangeReview(
   return { item, context, baseSha };
 }
 
+export function buildLocalRangeReviewForTest(
+  targetDir: string,
+  repo: string,
+  baseRef: string,
+): { item: Item; context: ItemContext; baseSha: string } {
+  return buildLocalRangeReview(targetDir, repo, baseRef);
+}
+
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
   const localOnly = boolArg(args.local_only);
