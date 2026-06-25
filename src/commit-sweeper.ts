@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   changedFilesForCommit,
@@ -851,6 +858,37 @@ export const LOCAL_REVIEW_SCRUBBED_TOKEN_ENV: readonly string[] = [
 ];
 export const LOCAL_REVIEW_WEB_SEARCH_CONFIG = 'web_search="disabled"';
 
+// `git status --porcelain` of a checkout (empty string = clean). Shared by the offline
+// committed-range review paths (commit-sweeper `local-review` and clawsweeper `--local-range`)
+// so both enforce the same "review COMMITTED work on a clean checkout" contract.
+export function dirtyWorktree(targetDir: string): string {
+  return run("git", ["status", "--porcelain"], { cwd: targetDir }).trim();
+}
+
+// Withhold every GitHub credential from an offline review engine. Shared by the offline
+// committed-range review paths so neither can leak a token to the engine it spawns.
+export function scrubGitHubCredentialEnv(): void {
+  for (const tokenVar of LOCAL_REVIEW_SCRUBBED_TOKEN_ENV) {
+    delete process.env[tokenVar];
+  }
+}
+
+// Point `gh` at an empty config dir so an offline reviewer finds no cached credentials —
+// token-env deletion alone can't stop gh's own configured auth. Shared by the offline
+// review paths. `parentDir` keeps the empty dir inside a run dir (cleaned with the run);
+// omit it for a throwaway temp dir. Returns the dir set on GH_CONFIG_DIR.
+export function isolateGitHubConfigDir(parentDir?: string): string {
+  let ghEmptyConfig: string;
+  if (parentDir) {
+    ghEmptyConfig = join(parentDir, ".gh-empty");
+    mkdirSync(ghEmptyConfig, { recursive: true });
+  } else {
+    ghEmptyConfig = mkdtempSync(join(tmpdir(), "cs-gh-empty-"));
+  }
+  process.env.GH_CONFIG_DIR = ghEmptyConfig;
+  return ghEmptyConfig;
+}
+
 export function localReviewAdditionalPrompt(
   baseSha: string,
   headSha: string,
@@ -877,12 +915,10 @@ function localReviewCommand(args: Args): void {
   );
 
   // Spec: genuinely offline — withhold every GitHub credential from the review engine.
-  for (const tokenVar of LOCAL_REVIEW_SCRUBBED_TOKEN_ENV) {
-    delete process.env[tokenVar];
-  }
+  scrubGitHubCredentialEnv();
 
   // Spec: committed-range review requires a clean checkout (no hidden staged/untracked work).
-  const dirtyTree = run("git", ["status", "--porcelain"], { cwd: targetDir }).trim();
+  const dirtyTree = dirtyWorktree(targetDir);
   if (dirtyTree) {
     console.error(`[local-review] working tree not clean — commit or stash first:\n${dirtyTree}`);
     process.exit(1);
@@ -923,9 +959,7 @@ function localReviewCommand(args: Args): void {
   // refs, and `gh` uses its own configured auth (token-env deletion can't stop it),
   // so point it at an empty config dir — any `gh` the spawned reviewer runs finds
   // no cached credentials. Belt-and-suspenders with Codex's read-only sandbox.
-  const ghEmptyConfig = join(runDir, ".gh-empty");
-  ensureDir(ghEmptyConfig);
-  process.env.GH_CONFIG_DIR = ghEmptyConfig;
+  isolateGitHubConfigDir(runDir);
 
   const additionalPrompt = localReviewAdditionalPrompt(baseSha, headSha, baseBranch);
   // Layer extra review policy on top of the target repo's OWN AGENTS.md/.claude/skills

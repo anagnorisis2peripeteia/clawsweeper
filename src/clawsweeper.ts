@@ -52,6 +52,14 @@ import {
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
 import { isUserFacingCommandError, runText, UserFacingCommandError } from "./command.js";
+import {
+  commitMetadata,
+  dirtyWorktree,
+  isolateGitHubConfigDir,
+  localReviewAdditionalPrompt,
+  scrubGitHubCredentialEnv,
+  LOCAL_REVIEW_WEB_SEARCH_CONFIG,
+} from "./commit-sweeper.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
   buildOpenClawPrSurfaceStats,
@@ -7340,6 +7348,7 @@ function runCodex(options: {
   proofScratchDir?: string;
   prompt?: string;
   quietLogs?: boolean;
+  extraCodexConfig?: string[];
 }): Decision {
   ensureDir(options.workDir);
   const proofScratchDir =
@@ -7380,6 +7389,7 @@ function runCodex(options: {
       codexConfig.splice(1, 0, codexLoginConfig());
     }
     if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
+    if (options.extraCodexConfig) codexConfig.push(...options.extraCodexConfig);
     for (let attempt = 1; attempt <= passAttempts; attempt += 1) {
       if (existsSync(outputPath)) unlinkSync(outputPath);
       const remainingMs = options.timeoutMs - (Date.now() - startedAt);
@@ -16265,7 +16275,7 @@ function buildLocalRangeReview(
   targetDir: string,
   repo: string,
   baseRef: string,
-): { item: Item; context: ItemContext; baseSha: string } {
+): { item: Item; context: ItemContext; baseSha: string; headSha: string } {
   const base = baseRef || "origin/main";
   const headSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
   const baseSha = run("git", ["merge-base", base, "HEAD"], { cwd: targetDir }).trim();
@@ -16274,20 +16284,32 @@ function buildLocalRangeReview(
       `No local-range review: HEAD has no commits beyond ${base} in ${targetDir}.`,
     );
   }
-  const gitField = (format: string): string =>
-    run("git", ["log", "-1", `--format=${format}`, headSha], { cwd: targetDir }).trim();
-  const title = gitField("%s") || `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`;
-  const bodyText = gitField("%b");
-  const author = gitField("%an") || "local";
-  const committedAt = gitField("%cI") || "1970-01-01T00:00:00Z";
+  // Reuse #298's committed-range contract: this offline review covers COMMITTED work,
+  // so a dirty tree (staged/untracked changes the review can't see) is rejected.
+  const dirtyTree = dirtyWorktree(targetDir);
+  if (dirtyTree) {
+    throw new UserFacingCommandError(
+      `No local-range review: working tree not clean — commit or stash first:\n${dirtyTree}`,
+    );
+  }
+  // Reuse #298's offline commit metadata (offline=true skips all gh-api hydration).
+  const meta = commitMetadata(targetDir, repo, headSha, true);
+  const bodyText = run("git", ["log", "-1", "--format=%b", headSha], { cwd: targetDir }).trim();
+  const title = meta.subject || `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`;
+  const author = meta.authorName || "local";
+  const committedAt = meta.committedAt || "1970-01-01T00:00:00Z";
   const nameStatus = run("git", ["diff", "--name-status", `${baseSha}..${headSha}`], {
     cwd: targetDir,
   }).trim();
   const pullFiles = nameStatus
     ? nameStatus.split("\n").map((line) => {
-        const tab = line.indexOf("\t");
-        const status = tab >= 0 ? line.slice(0, tab) : line;
-        const filename = tab >= 0 ? line.slice(tab + 1) : line;
+        // name-status rows are tab-separated: "A\tfile", "M\tfile", or for rename/copy
+        // "R100\told\tnew". The reviewable path is always the LAST field (the new path);
+        // the status is the first. Splitting on the first tab only would feed the literal
+        // "old\tnew" to `git diff -- <path>` and yield an empty patch for renames/copies.
+        const parts = line.split("\t");
+        const status = parts[0] ?? line;
+        const filename = parts[parts.length - 1] ?? line;
         const patch = run("git", ["diff", `${baseSha}..${headSha}`, "--", filename], {
           cwd: targetDir,
         });
@@ -16303,7 +16325,9 @@ function buildLocalRangeReview(
     createdAt: committedAt,
     updatedAt: committedAt,
     author,
-    authorAssociation: "OWNER",
+    // A pre-submission self-review is the CONTRIBUTOR case — the proof gate treats OWNER
+    // (maintainer) PRs more leniently, which would undercut exercising the real proof path.
+    authorAssociation: "CONTRIBUTOR",
     labels: [],
   };
   const context: ItemContext = {
@@ -16320,20 +16344,23 @@ function buildLocalRangeReview(
     pullFiles,
     counts: { comments: 0, timeline: 0, pullFiles: pullFiles.length },
   };
-  return { item, context, baseSha };
+  return { item, context, baseSha, headSha };
 }
 
 export function buildLocalRangeReviewForTest(
   targetDir: string,
   repo: string,
   baseRef: string,
-): { item: Item; context: ItemContext; baseSha: string } {
+): { item: Item; context: ItemContext; baseSha: string; headSha: string } {
   return buildLocalRangeReview(targetDir, repo, baseRef);
 }
 
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
-  const localOnly = boolArg(args.local_only);
+  // `--local-range` is inherently a local, offline operation, so it implies `--local-only`
+  // (no GitHub writes, and the local Codex auth / Windows-launcher path in runCodex below).
+  const localRange = boolArg(args.local_range);
+  const localOnly = boolArg(args.local_only) || localRange;
   const verbose = boolArg(args.verbose);
   const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
@@ -16342,8 +16369,18 @@ function reviewCommand(args: Args): void {
     : undefined;
   const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
   const humanLocalReview = localExactItem && !verbose;
+  // Every --local-range review is synthesized as item #0, so its item-numbered artifacts
+  // (0.md, codex/0.json, proof-scratch/0, logs) would collide across repeated/concurrent
+  // pre-PR runs under one default dir. Give each run a unique per-run dir (mirrors #298's
+  // run-<ts>-<pid> identity). An explicit --artifact-dir is still honored as-is.
+  const defaultArtifactDir = defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers);
   const artifactDir = resolve(
-    stringArg(args.artifact_dir, defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers)),
+    stringArg(
+      args.artifact_dir,
+      localRange
+        ? join(defaultArtifactDir, `local-range-${Date.now()}-${process.pid}`)
+        : defaultArtifactDir,
+    ),
   );
   if (humanLocalReview) {
     console.error(`Local ClawSweeper review for ${targetRepo()}#${itemNumber}`);
@@ -16398,10 +16435,26 @@ function reviewCommand(args: Args): void {
     const providedBody = readFileSync(bodyFile, "utf8");
     additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
   }
-  const localRange = boolArg(args.local_range);
   const localRangeData = localRange
     ? buildLocalRangeReview(openclawDir, targetRepo(), stringArg(args.base, ""))
     : undefined;
+  if (localRangeData) {
+    // Reuse #298's FULL offline envelope (not just token-scrub): withhold every GitHub
+    // credential AND point gh at an empty config dir — token deletion alone can't stop
+    // gh's own cached auth — and prepend the no-network local-review prompt.
+    scrubGitHubCredentialEnv();
+    isolateGitHubConfigDir();
+    additionalPrompt = [
+      localReviewAdditionalPrompt(
+        localRangeData.baseSha,
+        localRangeData.headSha,
+        stringArg(args.base, "") || "origin/main",
+      ),
+      additionalPrompt,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
   const hotIntake = boolArg(args.hot_intake);
@@ -16557,6 +16610,7 @@ function reviewCommand(args: Args): void {
                   proofScratchDir,
                   prompt: prompt.text,
                   quietLogs: humanLocalReview,
+                  ...(localRange ? { extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG] } : {}),
                 });
               }
               return runReviewWithEngine({
