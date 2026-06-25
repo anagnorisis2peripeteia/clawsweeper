@@ -16068,6 +16068,37 @@ function engineModelFor(engine: ReviewEngine, override: string): string {
 // the usage ledger marks maxed-until-future; a quota error at runtime is recorded
 // and falls through to the next.
 type CascadeEngine = ReviewEngine | "auto" | "cheap";
+// Quality gate for the cheap cascade: a weak local model (qwen) can hallucinate findings
+// or rubber-stamp a clean bill. When its Decision trips any of these, the cheap cascade
+// upgrades to a stronger (still cheap-tier) engine — but only if the usage ledger says one
+// is free (see the cascade loop). `auto` (strong tier) never quality-escalates.
+function reviewQualitySuspect(
+  decision: Decision,
+  changedFiles: ReadonlySet<string>,
+): { suspect: boolean; reason: string } {
+  // Clean bill: a weak model's "no findings" is its least trustworthy output — confirm it.
+  if (decision.reviewFindings.length === 0) {
+    return { suspect: true, reason: "clean bill (no findings)" };
+  }
+  // Low overall confidence.
+  if (decision.confidence === "low") {
+    return { suspect: true, reason: "low confidence" };
+  }
+  // Hallucination: a MAJORITY of findings cite files outside the reviewed diff. A single
+  // off-diff finding can be a legit cross-file concern, so gate on >50% to avoid false flags.
+  const filed = decision.reviewFindings.filter((f) => f.file);
+  if (filed.length > 0 && changedFiles.size > 0) {
+    const offDiff = filed.filter((f) => !changedFiles.has(f.file)).length;
+    if (offDiff / filed.length > 0.5) {
+      return {
+        suspect: true,
+        reason: `${offDiff}/${filed.length} findings cite files outside the diff (likely hallucinated)`,
+      };
+    }
+  }
+  return { suspect: false, reason: "" };
+}
+
 function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // `auto` is the authoritative FINAL-HEAD clawsweeper gate: it cascades the STRONG
   // tier cheapest-first and ends at `claude` — the always-available floor (the Claude
@@ -16084,12 +16115,12 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   if (requested === "auto") return ["agy-claude", "codex", "claude"];
   // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model, so it
   // still flags PR-body/proof/mantis flaws, not just code (the code-only pass is the
-  // separate autoreview/commit-sweeper gate). Mirrors `auto`'s shape: try the best quota'd
-  // engine first, end at the always-available floor. `agy-gemini` (Gemini 3.1 Pro, fast +
-  // on agy's generous quota) leads — otherwise qwen, always-available + first, would win
-  // every time and agy-gemini/cursor would never run. `opencode`/qwen-H100 is the floor
-  // (no quota); use `--engine opencode` explicitly to force the local model.
-  if (requested === "cheap") return ["agy-gemini", "cursor", "opencode"];
+  // separate autoreview/commit-sweeper gate). qwen-H100 (opencode) runs FIRST — free,
+  // local, always-available — then the cascade upgrades to cursor → agy-gemini ONLY when
+  // qwen's review looks untrustworthy (see reviewQualitySuspect), and only to an engine
+  // the usage ledger says is available. So agy-gemini gets a look-in exactly when qwen
+  // does a bad job, not on every pass.
+  if (requested === "cheap") return ["opencode", "cursor", "agy-gemini"];
   return [requested];
 }
 
@@ -16579,6 +16610,16 @@ function reviewCommand(args: Args): void {
         decision = ((): Decision => {
           const cascade = reviewEngineCascadeOrder(engine);
           const notes: string[] = [];
+          // Quality-gated upgrade (cheap tier): if a cheap engine's review looks untrustworthy,
+          // escalate to the next AVAILABLE engine; keep the best review we got if every upgrade
+          // rung is usage-maxed (never block on a review that won't run).
+          const changedFiles = new Set<string>(
+            (context.pullFiles ?? []).flatMap((f) => {
+              const name = (f as { filename?: unknown }).filename;
+              return typeof name === "string" && name ? [name] : [];
+            }),
+          );
+          let best: Decision | null = null;
           for (let i = 0; i < cascade.length; i += 1) {
             const eng = cascade[i]!;
             const nowMs = Date.now();
@@ -16617,7 +16658,7 @@ function reviewCommand(args: Args): void {
                   ...(localRange ? { extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG] } : {}),
                 });
               }
-              return runReviewWithEngine({
+              const engineDecision = runReviewWithEngine({
                 engine: eng,
                 item,
                 model: engineModelFor(eng, eng === engine ? engineModelOverride : ""),
@@ -16627,6 +16668,21 @@ function reviewCommand(args: Args): void {
                 workDir: codexWorkDir,
                 quietLogs: humanLocalReview,
               });
+              // Cheap-tier quality gate: a suspect review upgrades to the next (more capable)
+              // available engine. The last rung is always accepted (nothing better to climb to).
+              if (engine === "cheap" && i < cascade.length - 1) {
+                const q = reviewQualitySuspect(engineDecision, changedFiles);
+                if (q.suspect) {
+                  best = engineDecision;
+                  notes.push(`${eng}: ${q.reason} → upgrading`);
+                  if (!humanLocalReview)
+                    console.error(
+                      `[review] engine ${eng} review suspect (${q.reason}) — upgrading to next available engine`,
+                    );
+                  continue;
+                }
+              }
+              return engineDecision;
             } catch (engineError) {
               const output = `${engineError instanceof Error ? engineError.message : String(engineError)}\n${readEngineQuotaLog(codexWorkDir, eng)}`;
               // The cascade falls through on ANY failure to the next engine in the tier
@@ -16642,6 +16698,15 @@ function reviewCommand(args: Args): void {
                   `[review] engine ${eng} ${wasQuota ? "usage-exhausted — recorded" : "failed"} — falling through`,
                 );
             }
+          }
+          if (best) {
+            // Wanted to upgrade but every better engine was usage-maxed — keep the best cheap
+            // review rather than block on a review that won't run.
+            if (!humanLocalReview)
+              console.error(
+                `[review] kept cheap review (no upgrade engine available): ${notes.join("; ")}`,
+              );
+            return best;
           }
           throw new CodexReviewError({
             message: `all review engines exhausted/failed: ${notes.join("; ")}`,
