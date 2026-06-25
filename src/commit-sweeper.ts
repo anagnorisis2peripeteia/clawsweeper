@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import {
   changedFilesForCommit,
@@ -422,6 +429,22 @@ export function scrubGitHubCredentialEnv(): void {
   }
 }
 
+// Point `gh` at an empty config dir so an offline reviewer finds no cached credentials —
+// token-env deletion alone can't stop gh's own configured auth. Shared by the offline
+// review paths. `parentDir` keeps the empty dir inside a run dir (cleaned with the run);
+// omit it for a throwaway temp dir. Returns the dir set on GH_CONFIG_DIR.
+export function isolateGitHubConfigDir(parentDir?: string): string {
+  let ghEmptyConfig: string;
+  if (parentDir) {
+    ghEmptyConfig = join(parentDir, ".gh-empty");
+    mkdirSync(ghEmptyConfig, { recursive: true });
+  } else {
+    ghEmptyConfig = mkdtempSync(join(tmpdir(), "cs-gh-empty-"));
+  }
+  process.env.GH_CONFIG_DIR = ghEmptyConfig;
+  return ghEmptyConfig;
+}
+
 export function localReviewAdditionalPrompt(
   baseSha: string,
   headSha: string,
@@ -486,9 +509,7 @@ function localReviewCommand(args: Args): void {
   // refs, and `gh` uses its own configured auth (token-env deletion can't stop it),
   // so point it at an empty config dir — any `gh` the spawned reviewer runs finds
   // no cached credentials. Belt-and-suspenders with Codex's read-only sandbox.
-  const ghEmptyConfig = join(runDir, ".gh-empty");
-  ensureDir(ghEmptyConfig);
-  process.env.GH_CONFIG_DIR = ghEmptyConfig;
+  isolateGitHubConfigDir(runDir);
 
   const additionalPrompt = localReviewAdditionalPrompt(baseSha, headSha, baseBranch);
 

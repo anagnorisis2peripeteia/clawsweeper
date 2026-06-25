@@ -54,6 +54,8 @@ import { isUserFacingCommandError, runText, UserFacingCommandError } from "./com
 import {
   commitMetadata,
   dirtyWorktree,
+  isolateGitHubConfigDir,
+  localReviewAdditionalPrompt,
   scrubGitHubCredentialEnv,
   LOCAL_REVIEW_WEB_SEARCH_CONFIG,
 } from "./commit-sweeper.js";
@@ -16026,7 +16028,7 @@ function buildLocalRangeReview(
   targetDir: string,
   repo: string,
   baseRef: string,
-): { item: Item; context: ItemContext; baseSha: string } {
+): { item: Item; context: ItemContext; baseSha: string; headSha: string } {
   const base = baseRef || "origin/main";
   const headSha = run("git", ["rev-parse", "HEAD"], { cwd: targetDir }).trim();
   const baseSha = run("git", ["merge-base", base, "HEAD"], { cwd: targetDir }).trim();
@@ -16054,9 +16056,13 @@ function buildLocalRangeReview(
   }).trim();
   const pullFiles = nameStatus
     ? nameStatus.split("\n").map((line) => {
-        const tab = line.indexOf("\t");
-        const status = tab >= 0 ? line.slice(0, tab) : line;
-        const filename = tab >= 0 ? line.slice(tab + 1) : line;
+        // name-status rows are tab-separated: "A\tfile", "M\tfile", or for rename/copy
+        // "R100\told\tnew". The reviewable path is always the LAST field (the new path);
+        // the status is the first. Splitting on the first tab only would feed the literal
+        // "old\tnew" to `git diff -- <path>` and yield an empty patch for renames/copies.
+        const parts = line.split("\t");
+        const status = parts[0] ?? line;
+        const filename = parts[parts.length - 1] ?? line;
         const patch = run("git", ["diff", `${baseSha}..${headSha}`, "--", filename], {
           cwd: targetDir,
         });
@@ -16072,7 +16078,9 @@ function buildLocalRangeReview(
     createdAt: committedAt,
     updatedAt: committedAt,
     author,
-    authorAssociation: "OWNER",
+    // A pre-submission self-review is the CONTRIBUTOR case — the proof gate treats OWNER
+    // (maintainer) PRs more leniently, which would undercut exercising the real proof path.
+    authorAssociation: "CONTRIBUTOR",
     labels: [],
   };
   const context: ItemContext = {
@@ -16089,20 +16097,22 @@ function buildLocalRangeReview(
     pullFiles,
     counts: { comments: 0, timeline: 0, pullFiles: pullFiles.length },
   };
-  return { item, context, baseSha };
+  return { item, context, baseSha, headSha };
 }
 
 export function buildLocalRangeReviewForTest(
   targetDir: string,
   repo: string,
   baseRef: string,
-): { item: Item; context: ItemContext; baseSha: string } {
+): { item: Item; context: ItemContext; baseSha: string; headSha: string } {
   return buildLocalRangeReview(targetDir, repo, baseRef);
 }
 
 function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
-  const localOnly = boolArg(args.local_only);
+  // `--local-range` is inherently a local, offline operation, so it implies `--local-only`
+  // (no GitHub writes, and the local Codex auth / Windows-launcher path in runCodex below).
+  const localOnly = boolArg(args.local_only) || boolArg(args.local_range);
   const verbose = boolArg(args.verbose);
   const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
@@ -16160,13 +16170,26 @@ function reviewCommand(args: Args): void {
     additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
   }
   const localRange = boolArg(args.local_range);
-  if (localRange) {
-    // Reuse #298's offline guarantee: withhold every GitHub credential from the engine.
-    scrubGitHubCredentialEnv();
-  }
   const localRangeData = localRange
     ? buildLocalRangeReview(openclawDir, targetRepo(), stringArg(args.base, ""))
     : undefined;
+  if (localRangeData) {
+    // Reuse #298's FULL offline envelope (not just token-scrub): withhold every GitHub
+    // credential AND point gh at an empty config dir — token deletion alone can't stop
+    // gh's own cached auth — and prepend the no-network local-review prompt.
+    scrubGitHubCredentialEnv();
+    isolateGitHubConfigDir();
+    additionalPrompt = [
+      localReviewAdditionalPrompt(
+        localRangeData.baseSha,
+        localRangeData.headSha,
+        stringArg(args.base, "") || "origin/main",
+      ),
+      additionalPrompt,
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
   const shardIndex = numberArg(args.shard_index, 0);
   const shardCount = numberArg(args.shard_count, 1);
   const hotIntake = boolArg(args.hot_intake);
