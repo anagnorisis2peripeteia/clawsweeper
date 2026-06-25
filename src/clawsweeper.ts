@@ -16059,12 +16059,20 @@ function engineModelFor(engine: ReviewEngine, override: string): string {
 // and falls through to the next.
 type CascadeEngine = ReviewEngine | "auto";
 function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
-  // `auto` is the opt-in usage-aware cascade. `codex` (the default) and `opencode`
-  // stay single-engine for backward-compat — no surprise fallthrough. Other explicit
-  // engines fall back to the opencode/qwen-local floor on a quota error.
-  if (requested === "auto") return ["codex", "agy-claude", "opencode"];
-  if (requested === "codex" || requested === "opencode") return [requested];
-  return [requested, "opencode"];
+  // `auto` is the authoritative FINAL-HEAD clawsweeper gate: it cascades the STRONG
+  // tier cheapest-first and ends at `claude` — the always-available floor (the Claude
+  // CLI runs on the same subscription as this agent, so it never hits an external
+  // quota the way agy/codex/cursor do). The cheap qwen pass is a SEPARATE, explicit
+  // `--engine opencode` step (dev-loop pre-filter), NOT part of the authoritative gate.
+  // `auto` is the authoritative FINAL-HEAD gate, so it cascades ONLY the STRONG tier —
+  // the models good enough for the authoritative pass: agy-claude → codex → claude
+  // (cheapest-first), ending at claude, the always-available floor (the Claude CLI runs
+  // on this agent's own subscription so it never hits an external quota). The cheap tier
+  // (qwen via `opencode`, plus cursor, agy-gemini) is for the dev-loop / pre-filter and
+  // is invoked explicitly, NOT folded into the authoritative gate. Explicit engines run
+  // single (exactly the one asked for; use `auto` for the strong-tier fallback).
+  if (requested === "auto") return ["agy-claude", "codex", "claude"];
+  return [requested];
 }
 
 // agy writes its quota error (RESOURCE_EXHAUSTED 429) to its --log-file, not
