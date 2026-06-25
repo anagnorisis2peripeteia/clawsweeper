@@ -46,7 +46,7 @@ test("buildLocalRangeReview synthesizes a PR item + offline diff from the local 
     assert.equal(result.item.title, "feat: add a feature");
     assert.equal(result.item.repo, "openclaw/clawsweeper");
     assert.equal(result.item.author, "Range Tester");
-    assert.equal(result.item.authorAssociation, "OWNER");
+    assert.equal(result.item.authorAssociation, "CONTRIBUTOR");
     assert.deepEqual(result.item.labels, []);
     assert.equal(result.item.url, `local:${headSha}`);
     assert.equal(result.item.createdAt, committedAt);
@@ -144,6 +144,35 @@ test("buildLocalRangeReview yields no pullFiles for a commit that changes nothin
     const result = buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref");
     assert.deepEqual(result.context.pullFiles, []);
     assert.equal(result.context.counts.pullFiles, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("buildLocalRangeReview handles renamed files (new path, non-empty patch, no tab leak)", () => {
+  const dir = initRepo();
+  try {
+    writeFileSync(join(dir, "old-name.txt"), "alpha\nbravo\ncharlie\ndelta\necho\n");
+    git(dir, "add", "old-name.txt");
+    git(dir, "commit", "-q", "-m", "init");
+    git(dir, "branch", "base-ref");
+    rmSync(join(dir, "old-name.txt"));
+    writeFileSync(join(dir, "new-name.txt"), "alpha\nbravo\ncharlie\ndelta\nFOXTROT\n");
+    git(dir, "add", "-A");
+    git(dir, "commit", "-q", "-m", "rename old-name -> new-name with one edit");
+
+    const result = buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref");
+    const files = result.context.pullFiles as Array<{
+      filename: string;
+      status: string;
+      patch: string;
+    }>;
+    // the new path is what surfaces — NOT the literal "old-name.txt\tnew-name.txt"
+    assert.ok(!files.some((f) => f.filename.includes("\t")), "filename must not be tab-joined");
+    const renamed = files.find((f) => f.filename === "new-name.txt");
+    assert.ok(renamed, "renamed file should appear under its new path");
+    assert.match(renamed?.status ?? "", /^R/);
+    assert.match(renamed?.patch ?? "", /FOXTROT/); // patch resolved against the new path
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
