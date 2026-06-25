@@ -16425,7 +16425,8 @@ function reviewCommand(args: Args): void {
   const profile = repoFromArgs(args);
   // `--local-range` is inherently a local, offline operation, so it implies `--local-only`
   // (no GitHub writes, and the local Codex auth / Windows-launcher path in runCodex below).
-  const localOnly = boolArg(args.local_only) || boolArg(args.local_range);
+  const localRange = boolArg(args.local_range);
+  const localOnly = boolArg(args.local_only) || localRange;
   const verbose = boolArg(args.verbose);
   const itemNumber = numberArg(args.item_number, 0) || undefined;
   const hasItemNumbersInput = typeof args.item_numbers === "string" && args.item_numbers.trim();
@@ -16434,8 +16435,18 @@ function reviewCommand(args: Args): void {
     : undefined;
   const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
   const humanLocalReview = localExactItem && !verbose;
+  // Every --local-range review is synthesized as item #0, so its item-numbered artifacts
+  // (0.md, codex/0.json, proof-scratch/0, logs) would collide across repeated/concurrent
+  // pre-PR runs under one default dir. Give each run a unique per-run dir (mirrors #298's
+  // run-<ts>-<pid> identity). An explicit --artifact-dir is still honored as-is.
+  const defaultArtifactDir = defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers);
   const artifactDir = resolve(
-    stringArg(args.artifact_dir, defaultReviewArtifactDir(localOnly, itemNumber, itemNumbers)),
+    stringArg(
+      args.artifact_dir,
+      localRange
+        ? join(defaultArtifactDir, `local-range-${Date.now()}-${process.pid}`)
+        : defaultArtifactDir,
+    ),
   );
   if (humanLocalReview) {
     console.error(`Local ClawSweeper review for ${targetRepo()}#${itemNumber}`);
@@ -16482,7 +16493,6 @@ function reviewCommand(args: Args): void {
     const providedBody = readFileSync(bodyFile, "utf8");
     additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
   }
-  const localRange = boolArg(args.local_range);
   const localRangeData = localRange
     ? buildLocalRangeReview(openclawDir, targetRepo(), stringArg(args.base, ""))
     : undefined;
