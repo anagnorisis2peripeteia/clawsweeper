@@ -16082,10 +16082,14 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // is invoked explicitly, NOT folded into the authoritative gate. Explicit engines run
   // single (exactly the one asked for; use `auto` for the strong-tier fallback).
   if (requested === "auto") return ["agy-claude", "codex", "claude"];
-  // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model
-  // (qwen → cursor → agy-gemini), so it still flags PR-body/proof/mantis flaws, not
-  // just code (that code-only pass is the separate autoreview/commit-sweeper gate).
-  if (requested === "cheap") return ["opencode", "cursor", "agy-gemini"];
+  // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model, so it
+  // still flags PR-body/proof/mantis flaws, not just code (the code-only pass is the
+  // separate autoreview/commit-sweeper gate). Mirrors `auto`'s shape: try the best quota'd
+  // engine first, end at the always-available floor. `agy-gemini` (Gemini 3.1 Pro, fast +
+  // on agy's generous quota) leads — otherwise qwen, always-available + first, would win
+  // every time and agy-gemini/cursor would never run. `opencode`/qwen-H100 is the floor
+  // (no quota); use `--engine opencode` explicitly to force the local model.
+  if (requested === "cheap") return ["agy-gemini", "cursor", "opencode"];
   return [requested];
 }
 
