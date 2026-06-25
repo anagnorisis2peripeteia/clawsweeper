@@ -16057,7 +16057,7 @@ function engineModelFor(engine: ReviewEngine, override: string): string {
 // floor (no quota). `auto` walks frontier → floor. The pre-check skips any engine
 // the usage ledger marks maxed-until-future; a quota error at runtime is recorded
 // and falls through to the next.
-type CascadeEngine = ReviewEngine | "auto";
+type CascadeEngine = ReviewEngine | "auto" | "cheap";
 function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // `auto` is the authoritative FINAL-HEAD clawsweeper gate: it cascades the STRONG
   // tier cheapest-first and ends at `claude` — the always-available floor (the Claude
@@ -16072,6 +16072,10 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // is invoked explicitly, NOT folded into the authoritative gate. Explicit engines run
   // single (exactly the one asked for; use `auto` for the strong-tier fallback).
   if (requested === "auto") return ["agy-claude", "codex", "claude"];
+  // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model
+  // (qwen → cursor → agy-gemini), so it still flags PR-body/proof/mantis flaws, not
+  // just code (that code-only pass is the separate autoreview/commit-sweeper gate).
+  if (requested === "cheap") return ["opencode", "cursor", "agy-gemini"];
   return [requested];
 }
 
@@ -16365,9 +16369,9 @@ function reviewCommand(args: Args): void {
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const engineArg = stringArg(args.engine, "codex");
-  if (engineArg !== "auto" && !isReviewEngine(engineArg)) {
+  if (engineArg !== "auto" && engineArg !== "cheap" && !isReviewEngine(engineArg)) {
     throw new Error(
-      `--engine must be "auto" or one of ${REVIEW_ENGINES.join(", ")} (got "${engineArg}")`,
+      `--engine must be "auto", "cheap", or one of ${REVIEW_ENGINES.join(", ")} (got "${engineArg}")`,
     );
   }
   const engine: CascadeEngine = engineArg as CascadeEngine;
@@ -16567,13 +16571,18 @@ function reviewCommand(args: Args): void {
               });
             } catch (engineError) {
               const output = `${engineError instanceof Error ? engineError.message : String(engineError)}\n${readEngineQuotaLog(codexWorkDir, eng)}`;
-              // Only USAGE exhaustion cascades. Any other failure fails normally, so a
-              // real codex/agy error is never silently routed to a weaker engine.
-              if (!recordEngineExhausted(eng, output, nowMs)) throw engineError;
-              notes.push(`${eng}: usage-exhausted (recorded)`);
-              if (!humanLocalReview)
-                console.error(`[review] engine ${eng} usage-exhausted — recorded, falling through`);
+              // The cascade falls through on ANY failure to the next engine in the tier
+              // (so cheap qwen→cursor→agy-gemini and strong agy-claude→codex→claude both
+              // chain); a quota error is also recorded so the ledger pre-check skips it
+              // next time. The LAST engine propagates — and a single explicit `--engine X`
+              // has only itself, so it fails normally, never silently routed elsewhere.
+              const wasQuota = recordEngineExhausted(eng, output, nowMs);
+              notes.push(`${eng}: ${wasQuota ? "usage-exhausted (recorded)" : "failed"}`);
               if (i === cascade.length - 1) throw engineError;
+              if (!humanLocalReview)
+                console.error(
+                  `[review] engine ${eng} ${wasQuota ? "usage-exhausted — recorded" : "failed"} — falling through`,
+                );
             }
           }
           throw new CodexReviewError({
