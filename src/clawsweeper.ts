@@ -51,6 +51,12 @@ import {
 import { parseGhJson, parseGhJsonLines } from "./github-json.js";
 import { stableJson } from "./stable-json.js";
 import { isUserFacingCommandError, runText, UserFacingCommandError } from "./command.js";
+import {
+  commitMetadata,
+  dirtyWorktree,
+  scrubGitHubCredentialEnv,
+  LOCAL_REVIEW_WEB_SEARCH_CONFIG,
+} from "./commit-sweeper.js";
 import { AUTOMATION_LIMITS } from "./limits.js";
 import {
   buildOpenClawPrSurfaceStats,
@@ -7339,6 +7345,7 @@ function runCodex(options: {
   proofScratchDir?: string;
   prompt?: string;
   quietLogs?: boolean;
+  extraCodexConfig?: string[];
 }): Decision {
   ensureDir(options.workDir);
   const proofScratchDir =
@@ -7379,6 +7386,7 @@ function runCodex(options: {
       codexConfig.splice(1, 0, codexLoginConfig());
     }
     if (options.serviceTier) codexConfig.splice(1, 0, `service_tier="${options.serviceTier}"`);
+    if (options.extraCodexConfig) codexConfig.push(...options.extraCodexConfig);
     for (let attempt = 1; attempt <= passAttempts; attempt += 1) {
       if (existsSync(outputPath)) unlinkSync(outputPath);
       const remainingMs = options.timeoutMs - (Date.now() - startedAt);
@@ -16027,12 +16035,20 @@ function buildLocalRangeReview(
       `No local-range review: HEAD has no commits beyond ${base} in ${targetDir}.`,
     );
   }
-  const gitField = (format: string): string =>
-    run("git", ["log", "-1", `--format=${format}`, headSha], { cwd: targetDir }).trim();
-  const title = gitField("%s") || `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`;
-  const bodyText = gitField("%b");
-  const author = gitField("%an") || "local";
-  const committedAt = gitField("%cI") || "1970-01-01T00:00:00Z";
+  // Reuse #298's committed-range contract: this offline review covers COMMITTED work,
+  // so a dirty tree (staged/untracked changes the review can't see) is rejected.
+  const dirtyTree = dirtyWorktree(targetDir);
+  if (dirtyTree) {
+    throw new UserFacingCommandError(
+      `No local-range review: working tree not clean — commit or stash first:\n${dirtyTree}`,
+    );
+  }
+  // Reuse #298's offline commit metadata (offline=true skips all gh-api hydration).
+  const meta = commitMetadata(targetDir, repo, headSha, true);
+  const bodyText = run("git", ["log", "-1", "--format=%b", headSha], { cwd: targetDir }).trim();
+  const title = meta.subject || `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`;
+  const author = meta.authorName || "local";
+  const committedAt = meta.committedAt || "1970-01-01T00:00:00Z";
   const nameStatus = run("git", ["diff", "--name-status", `${baseSha}..${headSha}`], {
     cwd: targetDir,
   }).trim();
@@ -16144,6 +16160,10 @@ function reviewCommand(args: Args): void {
     additionalPrompt = `${additionalPrompt}\n\n## AUTHORITATIVE PR BODY (review THIS exact body)\nTreat the text below as the pull request's current body/description and review it as such — assess its real-behavior proof, telegram-visible-proof, and mantis recommendation against it. Do NOT fetch, prefer, or assume any other version of the body from the GitHub API. The diff, code, and comments are still the live PR.\n\n----- BEGIN PROVIDED PR BODY -----\n${providedBody}\n----- END PROVIDED PR BODY -----`;
   }
   const localRange = boolArg(args.local_range);
+  if (localRange) {
+    // Reuse #298's offline guarantee: withhold every GitHub credential from the engine.
+    scrubGitHubCredentialEnv();
+  }
   const localRangeData = localRange
     ? buildLocalRangeReview(openclawDir, targetRepo(), stringArg(args.base, ""))
     : undefined;
@@ -16282,6 +16302,7 @@ function reviewCommand(args: Args): void {
           proofScratchDir,
           prompt: prompt.text,
           quietLogs: humanLocalReview,
+          ...(localRange ? { extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG] } : {}),
         });
       } catch (error) {
         codexFailures += 1;

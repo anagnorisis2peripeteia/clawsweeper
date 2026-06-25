@@ -149,6 +149,26 @@ test("buildLocalRangeReview yields no pullFiles for a commit that changes nothin
   }
 });
 
+test("buildLocalRangeReview refuses a dirty working tree (committed-range contract)", () => {
+  const dir = initRepo();
+  try {
+    writeFileSync(join(dir, "keep.txt"), "base\n");
+    git(dir, "add", "keep.txt");
+    git(dir, "commit", "-q", "-m", "init");
+    git(dir, "branch", "base-ref");
+    writeFileSync(join(dir, "feature.txt"), "x\n");
+    git(dir, "add", "feature.txt");
+    git(dir, "commit", "-q", "-m", "feat: x");
+    writeFileSync(join(dir, "uncommitted.txt"), "dirty\n"); // untracked → dirty tree
+
+    assert.throws(() => buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref"), {
+      message: /not clean|commit or stash/i,
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("buildLocalRangeReview throws when HEAD has no commits beyond base", () => {
   const dir = initRepo();
   try {
