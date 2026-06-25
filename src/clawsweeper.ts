@@ -16191,15 +16191,22 @@ function engineSpawnSpec(
         input: "",
       };
     case "opencode":
-      // `opencode run [-m MODEL] --agent plan --dir DIR -- PROMPT`; trailing `--`
-      // so a `---`/`+++` diff line is never parsed as a flag.
+      // `opencode run [-m MODEL] --agent clawsweeper-review --dir DIR -- PROMPT`.
+      // The `clawsweeper-review` agent (in ~/.config/opencode/opencode.jsonc) denies EVERY
+      // tool — so qwen can't read files, run bash, or spawn the `task`/Explore sub-agent; it
+      // must answer the embedded prompt (which already carries the diff + schema) with JSON
+      // only, instead of going agentic ("let me check the files…", plan mode). Do NOT add
+      // `--pure`: the local/h100 qwen endpoint is served by the opencode-local-provider
+      // PLUGIN, which `--pure` disables ("undefined/chat/completions"). The mem plugin's
+      // session-compress line is harmless — extractJsonObject finds the JSON regardless.
+      // Trailing `--` so a `---`/`+++` diff line is never parsed as a flag.
       return {
         command: "opencode",
         args: [
           "run",
           ...(model ? ["-m", model] : []),
           "--agent",
-          "plan",
+          "clawsweeper-review",
           "--dir",
           openclawDir,
           "--",
