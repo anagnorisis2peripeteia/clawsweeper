@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -240,6 +241,82 @@ test("review rejects --item-number combined with --local-range", () => {
     assert.notEqual(r.status, 0, "should exit non-zero on the flag conflict");
     assert.match((r.stderr ?? "") + (r.stdout ?? ""), /cannot be combined with --local-range/i);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--local-range does not host-download proof video URLs from the body", async () => {
+  const hits: string[] = [];
+  const server = createServer((req, res) => {
+    hits.push(req.url ?? "");
+    res.writeHead(404);
+    res.end();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  const dir = initRepo();
+  const codexDir = mkdtempSync(join(tmpdir(), "lrr-codex-"));
+  const fakeCodex = join(codexDir, "fake-codex.sh");
+  const fakeCodexMarker = join(codexDir, "fake-codex-ran.txt");
+  writeFileSync(fakeCodex, '#!/bin/sh\nprintf "ran\\n" > "$FAKE_CODEX_MARKER"\nexit 1\n');
+  chmodSync(fakeCodex, 0o755);
+  try {
+    writeFileSync(join(dir, "a.txt"), "x\n");
+    git(dir, "add", "a.txt");
+    git(dir, "commit", "-q", "-m", "init");
+    git(dir, "branch", "base-ref");
+    writeFileSync(join(dir, "b.txt"), "y\n");
+    git(dir, "add", "b.txt");
+    // a video URL in the commit body that media-proof preprocessing would otherwise curl
+    git(
+      dir,
+      "commit",
+      "-q",
+      "-m",
+      `feat: thing\n\nproof video: http://127.0.0.1:${port}/proof.mp4`,
+    );
+    // codex is stubbed (CODEX_BIN exits 1) so no real engine runs; media-proof would still
+    // curl the URL BEFORE the engine if it weren't skipped for --local-range.
+    const result = spawnSync(
+      "node",
+      [
+        CLI,
+        "review",
+        "--local-only",
+        "--local-range",
+        "--base",
+        "base-ref",
+        "--target-repo",
+        "openclaw/clawsweeper",
+        "--target-dir",
+        dir,
+        "--artifact-dir",
+        join(codexDir, "artifacts"),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: "1",
+          CODEX_BIN: fakeCodex,
+          FAKE_CODEX_MARKER: fakeCodexMarker,
+        },
+        timeout: 60000,
+      },
+    );
+    assert.notEqual(result.status, 0, "fake Codex should make the review fail after setup");
+    assert.equal(readFileSync(fakeCodexMarker, "utf8"), "ran\n");
+    assert.equal(
+      hits.length,
+      0,
+      `--local-range must not host-download body video URLs (server hits: ${JSON.stringify(hits)})`,
+    );
+  } finally {
+    if (existsSync(fakeCodexMarker)) rmSync(fakeCodexMarker, { force: true });
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    rmSync(codexDir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -16588,7 +16588,13 @@ function reviewCommand(args: Args): void {
       const contextElapsedMs = Date.now() - contextStartedAt;
       const codexWorkDir = join(artifactDir, "codex");
       const proofScratchDir = join(codexWorkDir, "proof-scratch", String(item.number));
-      const preparedMediaProof = prepareMediaProofArtifacts(context, proofScratchDir);
+      // --local-range is a pre-PR LOCAL code review — it has no telegram-visible-proof to
+      // capture, and prepareMediaProofArtifacts would host-side `curl` + `ffmpeg` any media URL
+      // in the synthetic body (commit message / --body-file). Skip it entirely for local-range:
+      // no host download, no transcode of body-supplied URLs.
+      const preparedMediaProof: PreparedMediaProof = localRangeData
+        ? { manifestPath: null, summaryPath: null, artifacts: [] }
+        : prepareMediaProofArtifacts(context, proofScratchDir);
       const prompt = buildReviewPrompt(
         item,
         context,
