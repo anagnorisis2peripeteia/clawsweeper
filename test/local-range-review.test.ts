@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { buildLocalRangeReviewForTest } from "../dist/clawsweeper.js";
+
+const CLI = fileURLToPath(new URL("../dist/clawsweeper.js", import.meta.url));
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -209,6 +212,33 @@ test("buildLocalRangeReview throws when HEAD has no commits beyond base", () => 
     assert.throws(() => buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref"), {
       message: /no commits beyond/i,
     });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("review rejects --item-number combined with --local-range", () => {
+  // The guard fires before any checkout/fetch, so a non-git temp dir is enough.
+  const dir = mkdtempSync(join(tmpdir(), "lrr-guard-"));
+  try {
+    const r = spawnSync(
+      "node",
+      [
+        CLI,
+        "review",
+        "--local-only",
+        "--local-range",
+        "--item-number",
+        "5",
+        "--target-repo",
+        "openclaw/clawsweeper",
+        "--target-dir",
+        dir,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(r.status, 0, "should exit non-zero on the flag conflict");
+    assert.match((r.stderr ?? "") + (r.stdout ?? ""), /cannot be combined with --local-range/i);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

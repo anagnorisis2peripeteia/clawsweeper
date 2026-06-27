@@ -16433,6 +16433,15 @@ function reviewCommand(args: Args): void {
   const itemNumbers = hasItemNumbersInput
     ? itemNumbersArg(args.item_numbers, undefined)
     : undefined;
+  // --local-range synthesizes the review item from the local git range and never fetches a GitHub
+  // item, so an item number is meaningless here and could otherwise route into a managed GitHub
+  // checkout — reject the combination outright rather than silently ignore it.
+  if (localRange && (itemNumber !== undefined || itemNumbers !== undefined)) {
+    throw new UserFacingCommandError(
+      "--item-number / --item-numbers cannot be combined with --local-range (local-range reviews " +
+        "the local git range and never fetches a GitHub item).",
+    );
+  }
   const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
   const humanLocalReview = localExactItem && !verbose;
   // Every --local-range review is synthesized as item #0, so its item-numbered artifacts
