@@ -16580,11 +16580,22 @@ function runReviewWithEngine(options: {
       options.workDir,
       `${options.item.number}.${attempt}.${options.engine}.stderr.log`,
     );
+    const engineEnv = codexEnv();
+    if (options.engine === "opencode") {
+      const opencodeDataHome = join(options.workDir, "opencode-xdg-data");
+      const opencodeStateHome = join(options.workDir, "opencode-xdg-state");
+      ensureDir(opencodeDataHome);
+      ensureDir(opencodeStateHome);
+      Object.assign(engineEnv, {
+        XDG_DATA_HOME: opencodeDataHome,
+        XDG_STATE_HOME: opencodeStateHome,
+      });
+    }
     const result = runCodexProcess({
       command,
       args,
       cwd: options.openclawDir,
-      env: codexEnv(),
+      env: engineEnv,
       input,
       timeoutMs: remainingMs,
       stdoutPath,
