@@ -145,8 +145,13 @@ type MergeRiskLabelName =
   | "merge-risk: 🚨 availability"
   | "merge-risk: 🚨 automation"
   | "merge-risk: 🚨 other";
+type MaturityLabelName = "maturity:stable";
 type MergeRiskOptionCategory = "fix_before_merge" | "accept_risk" | "pause_or_close";
-type ReviewLabelName = Exclude<TriagePriority, "none"> | ImpactLabelName | MergeRiskLabelName;
+type ReviewLabelName =
+  | Exclude<TriagePriority, "none">
+  | ImpactLabelName
+  | MergeRiskLabelName
+  | MaturityLabelName;
 type ItemCategory =
   | "bug"
   | "regression"
@@ -469,6 +474,7 @@ interface Decision {
   triagePriority: TriagePriority;
   impactLabels: ImpactLabelName[];
   mergeRiskLabels: MergeRiskLabelName[];
+  maturityLabels: MaturityLabelName[];
   mergeRiskOptions: MergeRiskOption[];
   reviewMetrics: ReviewMetric[];
   labelJustifications: LabelJustification[];
@@ -524,6 +530,7 @@ interface ItemContext {
   issue: unknown;
   comments: unknown[];
   timeline: unknown[];
+  sourceRevision?: string;
   previousClawSweeperReview?: unknown;
   closingPullRequests?: unknown[];
   referencingMergedPullRequests?: unknown[];
@@ -1088,6 +1095,11 @@ const DEFAULT_CODEX_FALLBACK_MIN_BUDGET_MS = 120_000;
 const REVIEW_POLICY_VERSION = "2026-06-15-policy-v22";
 const REVIEW_ITEM_PROMPT_PATH = join(ROOT, "prompts", "review-item.md");
 const CLAWSWEEPER_DECISION_SCHEMA_PATH = join(ROOT, "schema", "clawsweeper-decision.schema.json");
+const MATURITY_STABLE_SHORTLIST_SCRIPT_PATH = join(
+  ROOT,
+  "scripts",
+  "maturity-stable-shortlist.mjs",
+);
 const PR_CLOSE_COVERAGE_PROOF_PROMPT_PATH = join(ROOT, "prompts", "pr-close-coverage-proof.md");
 const PR_CLOSE_COVERAGE_PROOF_SCHEMA_PATH = join(
   ROOT,
@@ -1380,6 +1392,20 @@ const MERGE_RISK_LABELS = [
 const MERGE_RISK_LABEL_NAMES: ReadonlySet<string> = new Set(
   MERGE_RISK_LABELS.map((label) => label.name),
 );
+const MATURITY_LABELS = [
+  {
+    name: "maturity:stable",
+    color: "1F883D",
+    description: "Issue affects a taxonomy feature currently scored M4/M5.",
+  },
+] as const satisfies readonly {
+  name: MaturityLabelName;
+  color: string;
+  description: string;
+}[];
+const MATURITY_LABEL_NAMES: ReadonlySet<string> = new Set(
+  MATURITY_LABELS.map((label) => label.name),
+);
 const ISSUE_ADVISORY_LABELS = [
   {
     name: "issue-rating: 🦀 challenger crab",
@@ -1575,6 +1601,9 @@ const IMPACT_LABEL_VALUES = new Set<ImpactLabelName>(IMPACT_LABELS.map((label) =
 const MERGE_RISK_LABEL_VALUES = new Set<MergeRiskLabelName>(
   MERGE_RISK_LABELS.map((label) => label.name),
 );
+const MATURITY_LABEL_VALUES = new Set<MaturityLabelName>(
+  MATURITY_LABELS.map((label) => label.name),
+);
 const REVIEW_LABEL_VALUES = new Set<ReviewLabelName>([
   "P0",
   "P1",
@@ -1582,6 +1611,7 @@ const REVIEW_LABEL_VALUES = new Set<ReviewLabelName>([
   "P3",
   ...IMPACT_LABELS.map((label) => label.name),
   ...MERGE_RISK_LABELS.map((label) => label.name),
+  ...MATURITY_LABELS.map((label) => label.name),
 ]);
 const REAL_BEHAVIOR_PROOF_STATUSES = new Set<RealBehaviorProofStatus>([
   "sufficient",
@@ -1665,6 +1695,7 @@ const DECISION_SCHEMA_KEYS = new Set([
   "triagePriority",
   "impactLabels",
   "mergeRiskLabels",
+  "maturityLabels",
   "mergeRiskOptions",
   "reviewMetrics",
   "labelJustifications",
@@ -2167,6 +2198,69 @@ function itemSnapshotHash(item: Item, context: ItemContext): string {
   return sha256(stableJson({ item: snapshotItem, context }));
 }
 
+function itemSourceRevisionSha256(issue: unknown, comments: unknown[] = []): string {
+  const source = asRecord(issue);
+  const snapshot = {
+    title: sourceRevisionScalar(source.title),
+    body: sourceRevisionScalar(source.body),
+    labels: revisionLabels(source.labels),
+    comments: comments
+      .map(asRecord)
+      .filter((comment) => !isClawSweeperComment(comment))
+      .map((comment) => ({
+        id: sourceRevisionScalar(comment.id),
+        author: sourceRevisionScalar(login(comment.user) ?? comment.author),
+        body: sourceRevisionScalar(comment.body),
+        updated_at: sourceRevisionScalar(
+          comment.updated_at ?? comment.updatedAt ?? comment.created_at,
+        ),
+      }))
+      .sort((left, right) =>
+        `${left.id}:${left.updated_at}`.localeCompare(`${right.id}:${right.updated_at}`),
+      ),
+  };
+  return sha256(JSON.stringify(snapshot));
+}
+
+function sourceRevisionScalar(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  return JSON.stringify(value);
+}
+
+function revisionLabels(labels: unknown): string[] {
+  return (Array.isArray(labels) ? labels : [])
+    .map((label) => normalizeLabelName(String(asRecord(label).name ?? label)))
+    .filter(Boolean)
+    .filter((label) => !isIgnorableSourceRevisionLabel(label))
+    .sort();
+}
+
+function isIgnorableSourceRevisionLabel(label: string) {
+  return (
+    isClawSweeperAdvisorySourceRevisionLabel(label) ||
+    (label.startsWith("clawsweeper:") &&
+      !["clawsweeper:human-review", "clawsweeper:manual-only"].includes(label)) ||
+    label === "no-stale" ||
+    label === "stale"
+  );
+}
+
+function isClawSweeperAdvisorySourceRevisionLabel(label: string): boolean {
+  return (
+    /^(?:status|rating|proof|merge-risk|impact|issue-rating):/.test(label) ||
+    /^p[0-3]$/.test(label) ||
+    label === "feature: ✨ showcase" ||
+    label === "mantis: telegram-visible-proof" ||
+    label === "triage: needs-real-behavior-proof"
+  );
+}
+
+export function itemSourceRevisionSha256ForTest(issue: unknown, comments: unknown[] = []): string {
+  return itemSourceRevisionSha256(issue, comments);
+}
+
 function reviewPolicyHash(options: {
   model?: string;
   reasoningEffort?: string;
@@ -2280,6 +2374,12 @@ function requireMergeRiskLabels(value: unknown): MergeRiskLabelName[] {
   return labels;
 }
 
+function requireMaturityLabels(value: unknown): MaturityLabelName[] {
+  const labels = requireEnumArray(value, MATURITY_LABEL_VALUES, "decision.maturityLabels");
+  if (labels.length > 1) throw new Error("decision.maturityLabels must contain at most 1 label");
+  return labels;
+}
+
 function parseMergeRiskOption(value: unknown, path: string): MergeRiskOption {
   const record = requireRecord(value, path);
   rejectUnexpectedKeys(record, MERGE_RISK_OPTION_SCHEMA_KEYS, path);
@@ -2379,19 +2479,23 @@ function requireLabelJustifications(value: unknown): LabelJustification[] {
 }
 
 function selectedReviewLabels(
-  decision: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels">,
+  decision: Pick<
+    Decision,
+    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels"
+  >,
 ): ReviewLabelName[] {
   return [
     ...(decision.triagePriority === "none" ? [] : [decision.triagePriority]),
     ...decision.impactLabels,
     ...decision.mergeRiskLabels,
+    ...decision.maturityLabels,
   ];
 }
 
 function validateLabelJustifications(
   decision: Pick<
     Decision,
-    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "labelJustifications"
+    "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels" | "labelJustifications"
   >,
 ): void {
   const selected = new Set<string>(selectedReviewLabels(decision));
@@ -2860,6 +2964,7 @@ export function parseDecision(value: unknown, item?: DecisionNormalizationItem):
     ),
     impactLabels: requireImpactLabels(record.impactLabels),
     mergeRiskLabels: requireMergeRiskLabels(record.mergeRiskLabels),
+    maturityLabels: requireMaturityLabels(record.maturityLabels),
     mergeRiskOptions: requireMergeRiskOptions(record.mergeRiskOptions),
     reviewMetrics: requireReviewMetrics(record.reviewMetrics),
     labelJustifications: requireLabelJustifications(record.labelJustifications),
@@ -6238,6 +6343,9 @@ function collectItemContext(
     24,
   );
   const comments = commentsWindow.items;
+  const sourceRevisionComments = commentsWindow.truncated
+    ? ghPaged<unknown>(`repos/${targetRepo()}/issues/${item.number}/comments`)
+    : comments;
   const filteredComments = filterReviewContextComments(comments, item.number);
   const previousClawSweeperReview = extractLatestClawSweeperReview(comments, item.number);
   const timelineWindow = ghPagedLinkHeaderContextWindow<unknown>(
@@ -6247,6 +6355,7 @@ function collectItemContext(
   const timeline = timelineWindow.items;
   const context: ItemContext = {
     issue: compactIssue(issue),
+    sourceRevision: itemSourceRevisionSha256(issue, sourceRevisionComments),
     comments: compactMappedWindow(
       filteredComments.included,
       filteredComments.included.length,
@@ -6917,6 +7026,9 @@ function buildReviewPrompt(
   const contextJson = contextJsonForPrompt(context);
   const schema = reviewDecisionSchemaText();
   const proofScratchDir = runtimeHints.proofScratchDir?.trim();
+  const maturityHelperPath = proofScratchDir
+    ? `\`${proofScratchDir}/maturity-stable-shortlist.mjs\``
+    : "the scratch directory as `maturity-stable-shortlist.mjs`";
   const mediaProofPrompt = mediaProofRuntimePrompt(
     runtimeHints.mediaProofSummary,
     runtimeHints.mediaProofManifestPath,
@@ -6951,6 +7063,7 @@ ${additionalPrompt.trim()}
 - You may use the available network and read-only GitHub token to inspect PR body links, comments, screenshots, videos, logs, terminal output, and target-repo artifacts.
 - Download proof artifacts into ${proofScratchDir ? `\`${proofScratchDir}\`` : "a temporary scratch directory"} before inspecting them.
 - The target checkout is read-only for review. Do not modify repository files; use the scratch directory or /tmp for downloaded evidence and generated video stills/contact sheets.
+- A token-light maturity helper is available at ${maturityHelperPath}. For issue maturity labels, first run \`node "$CLAWSWEEPER_PROOF_SCRATCH_DIR/maturity-stable-shortlist.mjs"\` from the target checkout and compare the issue against that shortlist; read the full scorecard or taxonomy only if the shortlist is ambiguous.
 ${mediaProofPrompt}
 
 ## GitHub Context
@@ -6970,6 +7083,31 @@ ${extra}
       additionalPromptChars: additionalPrompt.trim().length,
     },
   };
+}
+
+function prepareMaturityStableShortlistScript(proofScratchDir: string, openclawDir: string): void {
+  const scorecardPath = join(openclawDir, "qa", "maturity-scores.yaml");
+  const shortlist = maturityStableShortlist(scorecardPath);
+  writeFileSync(
+    join(proofScratchDir, "maturity-stable-shortlist.mjs"),
+    `#!/usr/bin/env node\nconsole.log(${JSON.stringify(shortlist)});\n`,
+    "utf8",
+  );
+}
+
+function maturityStableShortlist(scorecardPath: string): string {
+  const result = spawnSync(
+    process.execPath,
+    [MATURITY_STABLE_SHORTLIST_SCRIPT_PATH, scorecardPath],
+    {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+    },
+  );
+  if (result.status === 0) return result.stdout.trim();
+  const detail =
+    result.stderr?.trim() || result.error?.message || "maturity shortlist script failed";
+  return `Unable to read maturity shortlist: ${detail}`;
 }
 
 function reviewPromptTelemetry(
@@ -7137,6 +7275,7 @@ function codexFailureDecision(
     triagePriority: "none",
     impactLabels: [],
     mergeRiskLabels: [],
+    maturityLabels: [],
     mergeRiskOptions: [],
     reviewMetrics: [],
     labelJustifications: [],
@@ -7354,6 +7493,7 @@ function runCodex(options: {
   const proofScratchDir =
     options.proofScratchDir ?? join(options.workDir, "proof-scratch", String(options.item.number));
   ensureDir(proofScratchDir);
+  prepareMaturityStableShortlistScript(proofScratchDir, options.openclawDir);
   const preparedMediaProof = options.prompt
     ? { manifestPath: null, summaryPath: null, artifacts: [] }
     : prepareMediaProofArtifacts(options.context, proofScratchDir);
@@ -9176,6 +9316,12 @@ function mergeRiskLabelsFromReport(markdown: string): MergeRiskLabelName[] {
   );
 }
 
+function maturityLabelsFromReport(markdown: string): MaturityLabelName[] {
+  return frontMatterStringArray(markdown, "maturity_labels").filter(
+    (label): label is MaturityLabelName => MATURITY_LABEL_NAMES.has(label),
+  );
+}
+
 function mergeRiskOptionsFromReport(markdown: string): MergeRiskOption[] {
   return frontMatterJsonArray(markdown, "merge_risk_options")
     .map((entry, index) => {
@@ -9190,7 +9336,7 @@ function mergeRiskOptionsFromReport(markdown: string): MergeRiskOption[] {
 
 function labelJustificationsFromReport(
   markdown: string,
-  labels: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels">,
+  labels: Pick<Decision, "triagePriority" | "impactLabels" | "mergeRiskLabels" | "maturityLabels">,
 ): LabelJustification[] {
   const selected = new Set<string>(selectedReviewLabels(labels));
   const fromFrontMatter = frontMatterJsonArray(markdown, "label_justifications")
@@ -10812,6 +10958,36 @@ export function impactLabelsForTest(
   );
 }
 
+function nextMaturityLabels(
+  labels: readonly string[],
+  maturityLabels: readonly MaturityLabelName[],
+): string[] {
+  const nextLabels = labels.filter((label) => !MATURITY_LABEL_NAMES.has(label));
+  const uniqueMaturityLabels = new Set(maturityLabels);
+  for (const label of MATURITY_LABELS) {
+    if (uniqueMaturityLabels.has(label.name)) nextLabels.push(label.name);
+  }
+  return nextLabels;
+}
+
+export function maturityLabelSchemeForTest(): {
+  name: string;
+  color: string;
+  description: string;
+}[] {
+  return MATURITY_LABELS.map(({ name, color, description }) => ({ name, color, description }));
+}
+
+export function maturityLabelsForTest(
+  labels: readonly string[],
+  maturityLabels: readonly string[],
+): string[] {
+  return nextMaturityLabels(
+    labels,
+    maturityLabels.filter((label): label is MaturityLabelName => MATURITY_LABEL_NAMES.has(label)),
+  );
+}
+
 function nextMergeRiskLabels(
   labels: readonly string[],
   mergeRiskLabels: readonly MergeRiskLabelName[],
@@ -11116,6 +11292,28 @@ function ensureIssueAdvisorySyncLabel(name: string): void {
   }
 }
 
+function ensureMaturityLabel(name: MaturityLabelName): void {
+  const definition = MATURITY_LABELS.find((label) => label.name === name);
+  if (!definition) return;
+  try {
+    ghWithRetry(
+      [
+        "label",
+        "create",
+        definition.name,
+        "--color",
+        definition.color,
+        "--description",
+        definition.description,
+      ],
+      2,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/already exists/i.test(message)) throw error;
+  }
+}
+
 function syncPriorityLabel(options: {
   number: number;
   labels: readonly string[];
@@ -11177,6 +11375,40 @@ function syncImpactLabels(options: {
   let added = false;
   for (const label of labelsToAdd) {
     ensureImpactLabel(label);
+    if (tryAddOptionalLabel({ number: options.number, label, currentLabels: syncedLabels })) {
+      syncedLabels.push(label);
+      added = true;
+    }
+  }
+  return { labels: syncedLabels, changed: labelsToRemove.length > 0 || added };
+}
+
+function syncMaturityLabels(options: {
+  number: number;
+  labels: readonly string[];
+  maturityLabels: readonly MaturityLabelName[];
+  dryRun: boolean;
+}): { labels: string[]; changed: boolean } {
+  const nextLabels = nextMaturityLabels(options.labels, options.maturityLabels);
+  const currentLabelKeys = new Set(options.labels.map((label) => label.toLowerCase()));
+  const nextLabelKeys = new Set(nextLabels.map((label) => label.toLowerCase()));
+  const labelsToAdd = nextLabels.filter(
+    (label): label is MaturityLabelName =>
+      MATURITY_LABEL_NAMES.has(label) && !currentLabelKeys.has(label.toLowerCase()),
+  );
+  const labelsToRemove = options.labels.filter(
+    (label) => MATURITY_LABEL_NAMES.has(label) && !nextLabelKeys.has(label.toLowerCase()),
+  );
+  const changed = labelsToAdd.length > 0 || labelsToRemove.length > 0;
+  if (!changed) return { labels: nextLabels, changed };
+  if (options.dryRun) return { labels: nextLabels, changed };
+  for (const label of labelsToRemove) {
+    ghWithRetry(["issue", "edit", String(options.number), "--remove-label", label]);
+  }
+  const syncedLabels = options.labels.filter((label) => !labelsToRemove.includes(label));
+  let added = false;
+  for (const label of labelsToAdd) {
+    ensureMaturityLabel(label);
     if (tryAddOptionalLabel({ number: options.number, label, currentLabels: syncedLabels })) {
       syncedLabels.push(label);
       added = true;
@@ -12392,6 +12624,7 @@ function reportDecision(markdown: string, closeReason: CloseReason): Decision {
   const triagePriority = triagePriorityFromReport(markdown);
   const impactLabels = kind === "pull_request" ? [] : impactLabelsFromReport(markdown);
   const mergeRiskLabels = mergeRiskLabelsFromReport(markdown);
+  const maturityLabels = kind === "pull_request" ? [] : maturityLabelsFromReport(markdown);
   const visionFit = reportVisionFit(markdown);
   return {
     decision: "close",
@@ -12406,12 +12639,14 @@ function reportDecision(markdown: string, closeReason: CloseReason): Decision {
     triagePriority,
     impactLabels,
     mergeRiskLabels,
+    maturityLabels,
     mergeRiskOptions: mergeRiskOptionsFromReport(markdown),
     reviewMetrics: reviewMetricsFromReport(markdown),
     labelJustifications: labelJustificationsFromReport(markdown, {
       triagePriority,
       impactLabels,
       mergeRiskLabels,
+      maturityLabels,
     }),
     itemCategory:
       (frontMatterValue(markdown, "item_category") as ItemCategory | undefined) ?? "unclear",
@@ -12537,6 +12772,11 @@ function upgradePullRequestClosePromotionReport(
     upgraded,
     "item_snapshot_hash",
     itemSnapshotHash(item, context),
+  );
+  upgraded = replaceFrontMatterValue(
+    upgraded,
+    "item_source_revision",
+    context.sourceRevision ?? "unknown",
   );
   upgraded = replaceSectionValue(upgraded, REVIEW_SECTIONS.bestSolution, promotion.bestSolution);
   upgraded = replaceSectionValue(upgraded, REVIEW_SECTIONS.evidence, promotion.evidence);
@@ -13470,6 +13710,7 @@ function isClawSweeperOwnedLabel(label: string): boolean {
     PRIORITY_LABEL_NAMES.has(label) ||
     IMPACT_LABEL_NAMES.has(label) ||
     MERGE_RISK_LABEL_NAMES.has(label) ||
+    MATURITY_LABEL_NAMES.has(label) ||
     PR_RATING_LABEL_NAMES.has(label) ||
     PR_STATUS_LABEL_NAMES.has(label) ||
     label === FEATURE_SHOWCASE_LABEL ||
@@ -13489,6 +13730,7 @@ function desiredClawSweeperLabelsFromPublicReport(
   const reviewFailed = frontMatterValue(markdown, "review_status") === "failed";
   let labels = nextPriorityLabels(currentLabels, triagePriorityFromReport(markdown));
   labels = nextImpactLabels(labels, isPullRequest ? [] : impactLabelsFromReport(markdown));
+  labels = nextMaturityLabels(labels, isPullRequest ? [] : maturityLabelsFromReport(markdown));
   if (isPullRequest) {
     const realBehaviorProof = reportRealBehaviorProof(markdown);
     labels = nextMergeRiskLabels(labels, mergeRiskLabelsFromReport(markdown));
@@ -13557,6 +13799,14 @@ function labelTransitionReason(
       : labels.length
         ? `Current PR review merge-risk labels are ${labels.map(inlineCode).join(", ")}.`
         : "Current PR review selected no merge-risk labels.";
+  }
+  if (MATURITY_LABEL_NAMES.has(label)) {
+    const labels = maturityLabelsFromReport(markdown);
+    return action === "add"
+      ? "Current issue review matched this item to a stable maturity scorecard feature."
+      : labels.length
+        ? `Current issue maturity labels are ${labels.map(inlineCode).join(", ")}.`
+        : "Current issue review selected no maturity labels.";
   }
   if (PR_RATING_LABEL_NAMES.has(label)) {
     if (frontMatterValue(markdown, "review_status") === "failed") {
@@ -13653,6 +13903,7 @@ function labelJustificationsFromPublicReport(
     triagePriority: triagePriorityFromReport(markdown),
     impactLabels: impactLabelsFromReport(markdown),
     mergeRiskLabels: mergeRiskLabelsFromReport(markdown),
+    maturityLabels: maturityLabelsFromReport(markdown),
   });
   const byLabel = new Map(justifications.map((entry) => [entry.label, entry]));
   const add = (label: string | null | undefined, reason: string): void => {
@@ -14931,10 +15182,16 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
   const decision = frontMatterValue(markdown, "decision");
   const confidence = frontMatterValue(markdown, "confidence") ?? "unknown";
   const headSha = pullHeadShaFromReport(markdown) ?? "unknown";
+  const itemUpdatedAt = frontMatterValue(markdown, "item_updated_at") ?? "unknown";
+  const reviewedAt = frontMatterValue(markdown, "reviewed_at") ?? "unknown";
+  const sourceRevision = frontMatterValue(markdown, "item_source_revision") ?? "unknown";
   const baseAttrs = [
     `item=${markerAttributeValue(number)}`,
     `sha=${markerAttributeValue(headSha)}`,
     `confidence=${markerAttributeValue(confidence)}`,
+    `updated_at=${markerAttributeValue(itemUpdatedAt)}`,
+    `reviewed_at=${markerAttributeValue(reviewedAt)}`,
+    `source_revision=${markerAttributeValue(sourceRevision)}`,
   ].join(" ");
   const securityNeedsAttention = reportSecurityReview(markdown).status === "needs_attention";
   const humanReviewMarkers = (): string => {
@@ -14993,7 +15250,13 @@ export function reviewAutomationMarkersFromReport(markdown: string): string {
     ].join("\n");
   }
   if (decision === "close") {
-    return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
+    const closeReason = frontMatterValue(markdown, "close_reason") ?? "unknown";
+    const actionTaken = frontMatterValue(markdown, "action_taken") ?? "unknown";
+    const closeAttrs = `${baseAttrs} action_taken=${markerAttributeValue(actionTaken)} reason=${markerAttributeValue(closeReason)}`;
+    return [
+      `<!-- clawsweeper-verdict:close ${closeAttrs} -->`,
+      `<!-- clawsweeper-action:close-required ${closeAttrs} -->`,
+    ].join("\n");
   }
   return `<!-- clawsweeper-verdict:needs-human ${baseAttrs} -->`;
 }
@@ -15142,8 +15405,56 @@ function commentBody(comment: Record<string, unknown> | undefined): string | und
   return typeof body === "string" ? body : undefined;
 }
 
-function commentBodyMatches(comment: Record<string, unknown> | undefined, body: string): boolean {
-  return commentBody(comment)?.trim() === body.trim();
+const APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS = new Set([
+  "proposed_close",
+  "kept_open",
+  "skipped_pr_close_coverage_proof",
+  "retry_pr_close_coverage_proof",
+  ...RETRYABLE_CLOSE_SKIP_ACTIONS,
+  ...PAIR_BLOCKED_CLOSE_ACTIONS,
+]);
+
+function normalizeApplySyncCloseMarkerAction(body: string): string {
+  return body.replace(
+    /(<!-- clawsweeper-(?:verdict:close|action:close-required)\b[^>]*\s)action_taken=([^\s>]+)(?=\s|-->)/g,
+    (match, prefix: string, action: string) =>
+      APPLY_SYNC_EQUIVALENT_CLOSE_MARKER_ACTIONS.has(action)
+        ? `${prefix}action_taken=proposed_close`
+        : match,
+  );
+}
+
+function commentBodyMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  const actual = commentBody(comment)?.trim();
+  const expected = body.trim();
+  if (actual === expected) return true;
+  if (!actual || !options.allowApplyCloseActionUpgrade) return false;
+  return (
+    normalizeApplySyncCloseMarkerAction(actual) === normalizeApplySyncCloseMarkerAction(expected)
+  );
+}
+
+function reviewCommentHashMatches(
+  comment: Record<string, unknown> | undefined,
+  body: string,
+  storedHash: string | undefined,
+  expectedHash: string,
+  options: { allowApplyCloseActionUpgrade?: boolean } = {},
+): boolean {
+  if (storedHash === expectedHash) return true;
+  if (!storedHash || !options.allowApplyCloseActionUpgrade) return false;
+  const actual = commentBody(comment)?.trim();
+  if (!actual) return false;
+  if (
+    normalizeApplySyncCloseMarkerAction(actual) !== normalizeApplySyncCloseMarkerAction(body.trim())
+  ) {
+    return false;
+  }
+  return storedHash === sha256(actual);
 }
 
 const PATCHABLE_REVIEW_COMMENT_AUTHORS = new Set(
@@ -15747,6 +16058,7 @@ review_status: ${options.decision.summary.startsWith("Codex review failed") ? "f
 review_terminal_failure: ${options.decision.codexTerminalFailure === true}
 local_checkout_access: verified
 item_snapshot_hash: ${options.snapshotHash}
+item_source_revision: ${options.context.sourceRevision ?? "unknown"}
 close_comment_sha256: ${options.action.closeComment ? sha256(options.action.closeComment) : "none"}
 review_comment_sha256: none
 review_comment_id: unknown
@@ -15768,6 +16080,7 @@ work_likely_files: ${jsonFrontMatterValue(options.decision.workLikelyFiles)}
 triage_priority: ${options.decision.triagePriority}
 impact_labels: ${jsonFrontMatterValue(options.decision.impactLabels)}
 merge_risk_labels: ${jsonFrontMatterValue(options.decision.mergeRiskLabels)}
+maturity_labels: ${jsonFrontMatterValue(options.decision.maturityLabels)}
 merge_risk_options: ${JSON.stringify(options.decision.mergeRiskOptions)}
 review_metrics: ${JSON.stringify(options.decision.reviewMetrics)}
 label_justifications: ${JSON.stringify(options.decision.labelJustifications)}
@@ -16409,6 +16722,15 @@ function reviewCommand(args: Args): void {
   const itemNumbers = hasItemNumbersInput
     ? itemNumbersArg(args.item_numbers, undefined)
     : undefined;
+  // --local-range synthesizes the review item from the local git range and never fetches a GitHub
+  // item, so an item number is meaningless here and could otherwise route into a managed GitHub
+  // checkout — reject the combination outright rather than silently ignore it.
+  if (localRange && (itemNumber !== undefined || itemNumbers !== undefined)) {
+    throw new UserFacingCommandError(
+      "--item-number / --item-numbers cannot be combined with --local-range (local-range reviews " +
+        "the local git range and never fetches a GitHub item).",
+    );
+  }
   const localExactItem = localExactReviewItem(localOnly, itemNumber, itemNumbers);
   const humanLocalReview = localExactItem && !verbose;
   // Every --local-range review is synthesized as item #0, so its item-numbered artifacts
@@ -16563,7 +16885,13 @@ function reviewCommand(args: Args): void {
       const contextElapsedMs = Date.now() - contextStartedAt;
       const codexWorkDir = join(artifactDir, "codex");
       const proofScratchDir = join(codexWorkDir, "proof-scratch", String(item.number));
-      const preparedMediaProof = prepareMediaProofArtifacts(context, proofScratchDir);
+      // --local-range is a pre-PR LOCAL code review — it has no telegram-visible-proof to
+      // capture, and prepareMediaProofArtifacts would host-side `curl` + `ffmpeg` any media URL
+      // in the synthetic body (commit message / --body-file). Skip it entirely for local-range:
+      // no host download, no transcode of body-supplied URLs.
+      const preparedMediaProof: PreparedMediaProof = localRangeData
+        ? { manifestPath: null, summaryPath: null, artifacts: [] }
+        : prepareMediaProofArtifacts(context, proofScratchDir);
       const prompt = buildReviewPrompt(
         item,
         context,
@@ -17423,6 +17751,9 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               counterpartNumber,
               counterpartReviewCommentBody,
             );
+            const counterpartAllowApplyCloseActionUpgrade =
+              isApplyCloseCandidateReport(counterpartMarkdown);
+            const counterpartMarkedReviewCommentHash = sha256(counterpartMarkedReviewComment);
             const counterpartNeedsReviewCommentSync = shouldSyncReviewComment({
               syncCommentsOnly: false,
               isCloseProposal: true,
@@ -17435,10 +17766,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
               needsReviewCommentBodySync: !commentBodyMatches(
                 counterpartReviewComment,
                 counterpartMarkedReviewComment,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
               ),
-              needsReviewCommentHashSync:
-                frontMatterValue(counterpartMarkdown, "review_comment_sha256") !==
-                sha256(counterpartMarkedReviewComment),
+              needsReviewCommentHashSync: !reviewCommentHashMatches(
+                counterpartReviewComment,
+                counterpartMarkedReviewComment,
+                frontMatterValue(counterpartMarkdown, "review_comment_sha256"),
+                counterpartMarkedReviewCommentHash,
+                { allowApplyCloseActionUpgrade: counterpartAllowApplyCloseActionUpgrade },
+              ),
               needsReviewCommentReferenceSync:
                 frontMatterValue(counterpartMarkdown, "review_comment_id") === "unknown" ||
                 frontMatterValue(counterpartMarkdown, "review_comment_url") === "unknown",
@@ -17952,6 +18288,15 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
         item.labels = impactSyncResult.labels;
         clawSweeperLabelsChanged ||= impactSyncResult.changed;
         markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
+        const maturitySyncResult = syncMaturityLabels({
+          number,
+          labels: item.labels,
+          maturityLabels: item.kind === "pull_request" ? [] : maturityLabelsFromReport(markdown),
+          dryRun,
+        });
+        item.labels = maturitySyncResult.labels;
+        clawSweeperLabelsChanged ||= maturitySyncResult.changed;
+        markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
         let mergeRiskLabelsChanged = false;
         if (item.kind === "pull_request") {
           const mergeRiskSyncResult = syncMergeRiskLabels({
@@ -17965,7 +18310,12 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
           clawSweeperLabelsChanged ||= mergeRiskSyncResult.changed;
           markdown = replaceFrontMatterValue(markdown, "labels", JSON.stringify(item.labels));
         }
-        if (syncResult.changed || impactSyncResult.changed || mergeRiskLabelsChanged) {
+        if (
+          syncResult.changed ||
+          impactSyncResult.changed ||
+          maturitySyncResult.changed ||
+          mergeRiskLabelsChanged
+        ) {
           rememberSelfMutationUpdatedAt();
         }
       } catch (error) {
@@ -18013,13 +18363,20 @@ async function applyDecisionsCommand(args: Args): Promise<void> {
       }
     }
     let reviewCommentHash = sha256(markedReviewComment);
+    const allowApplyCloseActionUpgrade = isUpgradedCloseCandidate;
     let existingReviewCommentMatches = commentBodyMatches(
       existingReviewComment,
       markedReviewComment,
+      { allowApplyCloseActionUpgrade },
     );
     let needsReviewCommentBodySync = !existingReviewComment || !existingReviewCommentMatches;
-    let needsReviewCommentHashSync =
-      frontMatterValue(markdown, "review_comment_sha256") !== reviewCommentHash;
+    let needsReviewCommentHashSync = !reviewCommentHashMatches(
+      existingReviewComment,
+      markedReviewComment,
+      frontMatterValue(markdown, "review_comment_sha256"),
+      reviewCommentHash,
+      { allowApplyCloseActionUpgrade },
+    );
     let needsReviewCommentReferenceSync =
       frontMatterValue(markdown, "review_comment_id") === "unknown" ||
       frontMatterValue(markdown, "review_comment_url") === "unknown";
