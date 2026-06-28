@@ -256,10 +256,15 @@ test("--local-range does not host-download proof video URLs from the body", asyn
   const port = (server.address() as { port: number }).port;
   const dir = initRepo();
   const codexDir = mkdtempSync(join(tmpdir(), "lrr-codex-"));
-  const fakeCodex = join(codexDir, "fake-codex.sh");
+  const fakeCodex = join(codexDir, process.platform === "win32" ? "fake-codex.cmd" : "fake-codex.sh");
   const fakeCodexMarker = join(codexDir, "fake-codex-ran.txt");
-  writeFileSync(fakeCodex, '#!/bin/sh\nprintf "ran\\n" > "$FAKE_CODEX_MARKER"\nexit 1\n');
-  chmodSync(fakeCodex, 0o755);
+  writeFileSync(
+    fakeCodex,
+    process.platform === "win32"
+      ? "@echo off\r\necho ran>\"%FAKE_CODEX_MARKER%\"\r\nexit /b 1\r\n"
+      : '#!/bin/sh\nprintf "ran\\n" > "$FAKE_CODEX_MARKER"\nexit 1\n',
+  );
+  if (process.platform !== "win32") chmodSync(fakeCodex, 0o755);
   try {
     writeFileSync(join(dir, "a.txt"), "x\n");
     git(dir, "add", "a.txt");
@@ -305,7 +310,7 @@ test("--local-range does not host-download proof video URLs from the body", asyn
       },
     );
     assert.notEqual(result.status, 0, "fake Codex should make the review fail after setup");
-    assert.equal(readFileSync(fakeCodexMarker, "utf8"), "ran\n");
+    assert.match(readFileSync(fakeCodexMarker, "utf8"), /^ran\r?\n$/);
     assert.equal(
       hits.length,
       0,
