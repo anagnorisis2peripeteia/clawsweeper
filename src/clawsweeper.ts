@@ -32,7 +32,11 @@ import {
   redactInternalCodexModel,
 } from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
-import { engineUsageStatus, recordEngineExhausted } from "./engine-usage.js";
+import {
+  detectEngineExhaustion,
+  engineUsageStatus,
+  recordEngineExhausted,
+} from "./engine-usage.js";
 import {
   codexJsonlFailureDetail,
   codexRetryDelayMs,
@@ -16358,7 +16362,7 @@ function isReviewEngine(value: string): value is ReviewEngine {
 }
 
 // The opencode/qwen H100 endpoint is the always-available local floor of the cascade.
-const OPENCODE_FLOOR_MODEL = "local/h100/qwen3-coder:latest";
+const OPENCODE_FLOOR_MODEL = "local/h100/qwen3-coder-next-ud-q6-xl:latest";
 
 function engineModelFor(engine: ReviewEngine, override: string): string {
   if (override) return override;
@@ -16449,7 +16453,7 @@ function structuredReviewInstruction(schemaText: string, priorError?: string): s
   const retry = priorError
     ? `\n\nIMPORTANT: your previous response was rejected because: ${priorError}\nReturn corrected JSON only.`
     : "";
-  return `\n\n## Required output format (STRICT)\nDo not post any GitHub comment or run any write command. Respond with ONLY one JSON object that validates against the JSON Schema below. Output nothing else — no prose, no explanation, no markdown code fences. The first character of your response must be "{" and the last must be "}". Include every required property with a valid value.\n\nJSON Schema:\n${schemaText}${retry}`;
+  return `\n\n## Required output format (STRICT MACHINE CONTRACT)\nThis is not an interactive agent turn. Your stdout is parsed by a machine. Do not narrate progress, plans, tool use, repository exploration, or uncertainty. Do not write markdown. Do not use code fences. Do not emit any text before or after the object.\n\nRespond with ONLY one JSON object that validates against the JSON Schema below. The first character of your response must be "{" and the last must be "}". Include every required property with a valid value. If you cannot complete the review, still return a schema-valid conservative decision JSON with low confidence and explain the limitation inside schema fields.\n\nJSON Schema:\n${schemaText}${retry}`;
 }
 
 function extractJsonObject(stdout: string): string {
@@ -16462,6 +16466,235 @@ function extractJsonObject(stdout: string): string {
     throw new Error("model output contained no JSON object");
   }
   return text.slice(start, end + 1);
+}
+
+type LocalModelDecisionParseResult = {
+  decision: Decision;
+  rawJson: string;
+  parsedJson: string;
+  repairSteps: string[];
+  parseError?: string;
+  schemaError?: string;
+};
+
+type LocalModelJsonCandidate = {
+  text: string;
+  repairSteps: string[];
+};
+
+type LocalModelShapeCandidate = {
+  value: unknown;
+  repairSteps: string[];
+};
+
+const LOCAL_MODEL_JSON_FAILURES_FILE = "local-model-json-failures.jsonl";
+const LOCAL_MODEL_DECISION_REPAIR_CONTAINER_KEYS = new Set([
+  "agentsPolicyStatus",
+  "featureShowcase",
+  "mantisRecommendation",
+  "prRating",
+  "realBehaviorProof",
+  "securityReview",
+  "telegramVisibleProof",
+]);
+
+function parseLocalModelDecisionOutput(stdout: string, item: Item): LocalModelDecisionParseResult {
+  const rawJson = extractJsonObject(stdout);
+  let firstParseError = "";
+  let firstSchemaError = "";
+  let lastError = "";
+  for (const jsonCandidate of localModelJsonCandidates(rawJson)) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(jsonCandidate.text) as unknown;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!firstParseError) firstParseError = message;
+      lastError = message;
+      continue;
+    }
+    for (const shapeCandidate of localModelDecisionShapeCandidates(parsed)) {
+      try {
+        return {
+          decision: parseDecision(shapeCandidate.value, item),
+          rawJson,
+          parsedJson:
+            shapeCandidate.repairSteps.length > 0
+              ? JSON.stringify(shapeCandidate.value, null, 2)
+              : jsonCandidate.text,
+          repairSteps: [...jsonCandidate.repairSteps, ...shapeCandidate.repairSteps],
+          ...(firstParseError ? { parseError: firstParseError } : {}),
+          ...(firstSchemaError ? { schemaError: firstSchemaError } : {}),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!firstSchemaError) firstSchemaError = message;
+        lastError = message;
+      }
+    }
+  }
+  throw new Error(lastError || firstParseError || "model output could not be parsed");
+}
+
+export function parseLocalModelDecisionOutputForTest(stdout: string, item: Item): Decision {
+  return parseLocalModelDecisionOutput(stdout, item).decision;
+}
+
+function localModelJsonCandidates(rawJson: string): LocalModelJsonCandidate[] {
+  const candidates: LocalModelJsonCandidate[] = [{ text: rawJson, repairSteps: [] }];
+  const withoutTrailingCommas = rawJson.replace(/,\s*([}\]])/g, "$1");
+  const trailingCommaSteps =
+    withoutTrailingCommas === rawJson ? [] : ["removed trailing commas before closing delimiters"];
+  const balanced = balanceLocalModelJsonDelimiters(withoutTrailingCommas);
+  if (balanced.text !== rawJson) {
+    candidates.push({
+      text: balanced.text,
+      repairSteps: [...trailingCommaSteps, ...balanced.repairSteps],
+    });
+  } else if (trailingCommaSteps.length > 0) {
+    candidates.push({ text: withoutTrailingCommas, repairSteps: trailingCommaSteps });
+  }
+  return candidates;
+}
+
+function balanceLocalModelJsonDelimiters(text: string): LocalModelJsonCandidate {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (const char of text) {
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+    } else if (char === "{") {
+      stack.push("}");
+    } else if (char === "[") {
+      stack.push("]");
+    } else if (char === "}" || char === "]") {
+      if (stack[stack.length - 1] === char) stack.pop();
+    }
+  }
+  if (inString || stack.length === 0) return { text, repairSteps: [] };
+  return {
+    text: `${text}${stack.reverse().join("")}`,
+    repairSteps: [`closed ${stack.length} missing JSON delimiter(s) at end of output`],
+  };
+}
+
+function localModelDecisionShapeCandidates(value: unknown): LocalModelShapeCandidate[] {
+  const repaired = repairNestedDecisionRootFields(value);
+  return repaired.repairSteps.length > 0
+    ? [{ value, repairSteps: [] }, repaired]
+    : [{ value, repairSteps: [] }];
+}
+
+function repairNestedDecisionRootFields(value: unknown): LocalModelShapeCandidate {
+  const root = cloneJsonValue(value);
+  const repairSteps: string[] = [];
+  if (!isMutableRecord(root)) return { value, repairSteps };
+  for (const containerKey of LOCAL_MODEL_DECISION_REPAIR_CONTAINER_KEYS) {
+    const container = root[containerKey];
+    if (!isMutableRecord(container)) continue;
+    for (const key of DECISION_SCHEMA_KEYS) {
+      if (key === containerKey) continue;
+      if (Object.prototype.hasOwnProperty.call(root, key)) continue;
+      if (!Object.prototype.hasOwnProperty.call(container, key)) continue;
+      root[key] = container[key];
+      delete container[key];
+      repairSteps.push(`hoisted ${containerKey}.${key} to decision.${key}`);
+    }
+  }
+  return { value: root, repairSteps };
+}
+
+function cloneJsonValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
+function isMutableRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function writeLocalModelJsonFailure(options: {
+  workDir: string;
+  item: Item;
+  engine: ReviewEngine;
+  model: string;
+  attempt: number;
+  stdoutPath: string;
+  outcome: "failed" | "repaired";
+  rawOutput: string;
+  rawOutputKind: "json" | "text";
+  parsedJson?: string;
+  parseError?: string;
+  schemaError?: string;
+  repairSteps: readonly string[];
+}): void {
+  const repairedPath =
+    options.parsedJson && options.repairSteps.length > 0
+      ? join(
+          options.workDir,
+          `${options.item.number}.${options.attempt}.${options.engine}.repaired.json`,
+        )
+      : "";
+  if (repairedPath && options.parsedJson) writeFileSync(repairedPath, options.parsedJson, "utf8");
+  const sample = {
+    schemaVersion: 1,
+    timestamp: new Date().toISOString(),
+    item: {
+      repo: options.item.repo,
+      number: options.item.number,
+      kind: options.item.kind,
+      url: options.item.url,
+    },
+    engine: options.engine,
+    model: options.model,
+    attempt: options.attempt,
+    outcome: options.outcome,
+    parseError: options.parseError ?? null,
+    schemaError: options.schemaError ?? null,
+    repairSteps: options.repairSteps,
+    rawOutputPath: options.stdoutPath,
+    rawOutputKind: options.rawOutputKind,
+    repairedOutputPath: repairedPath || null,
+    rawSha256: sha256(options.rawOutput),
+    repairedSha256: options.parsedJson ? sha256(options.parsedJson) : null,
+    rawOutput: redactLocalModelTrainingText(options.rawOutput),
+    repairedOutput: options.parsedJson ? redactLocalModelTrainingText(options.parsedJson) : null,
+  };
+  writeFileSync(
+    join(options.workDir, LOCAL_MODEL_JSON_FAILURES_FILE),
+    `${JSON.stringify(sample)}\n`,
+    {
+      encoding: "utf8",
+      flag: "a",
+      mode: 0o600,
+    },
+  );
+}
+
+function redactLocalModelTrainingText(text: string): string {
+  return redactInternalCodexModel(text)
+    .replace(/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/g, "[REDACTED_OPENAI_KEY]")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(/\bgh[pousr]_[A-Za-z0-9_]{20,}\b/g, "[REDACTED_GITHUB_TOKEN]")
+    .replace(
+      /\b(OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|GH_TOKEN|GITHUB_TOKEN)=([^\s"']+)/g,
+      "$1=[REDACTED]",
+    )
+    .replace(
+      /"((?:OPENAI_API_KEY|CODEX_API_KEY|CODEX_ACCESS_TOKEN|GH_TOKEN|GITHUB_TOKEN))"\s*:\s*"[^"]*"/g,
+      '"$1":"[REDACTED]"',
+    );
 }
 
 function engineSpawnSpec(
@@ -16532,6 +16765,31 @@ function engineSpawnSpec(
   }
 }
 
+function reviewEngineAttemptLimit(engine: ReviewEngine): number {
+  const configuredAttempts = Number(process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS ?? 3);
+  const defaultAttempts = Math.min(
+    5,
+    Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
+  );
+  if (engine === "opencode") return defaultAttempts;
+  const configuredMeteredAttempts = Number(
+    process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS ?? 1,
+  );
+  const meteredAttempts = Math.min(
+    5,
+    Math.max(
+      1,
+      Number.isFinite(configuredMeteredAttempts) ? Math.floor(configuredMeteredAttempts) : 1,
+    ),
+  );
+  return Math.min(defaultAttempts, meteredAttempts);
+}
+
+function shouldAbortStructuredRetry(engine: ReviewEngine, errorMessage: string): boolean {
+  if (engine === "opencode") return false;
+  return /model output contained no JSON object/i.test(errorMessage);
+}
+
 // Drive a non-codex CLI to produce a schema-valid Decision. Embeds the decision
 // schema in the prompt (CLIs have no `--output-schema`), extracts the JSON object
 // from stdout, validates via parseDecision, and re-asks on invalid output.
@@ -16547,11 +16805,7 @@ function runReviewWithEngine(options: {
 }): Decision {
   ensureDir(options.workDir);
   const schemaText = reviewDecisionSchemaText();
-  const configuredAttempts = Number(process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS ?? 3);
-  const maxAttempts = Math.min(
-    5,
-    Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
-  );
+  const maxAttempts = reviewEngineAttemptLimit(options.engine);
   const startedAt = Date.now();
   let priorError: string | undefined;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -16603,6 +16857,11 @@ function runReviewWithEngine(options: {
     });
     const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
     if (result.error || result.status !== 0) {
+      const quotaOutput = `${result.stderr}\n${stdout}\n${readEngineQuotaLog(
+        options.workDir,
+        options.engine,
+      )}`;
+      const quota = detectEngineExhaustion(options.engine, quotaOutput, Date.now());
       priorError = `process exit ${result.status ?? "unknown"}: ${
         redactedOutputTail(result.stderr) || redactedOutputTail(stdout) || "no output"
       }`;
@@ -16611,16 +16870,95 @@ function runReviewWithEngine(options: {
           `[review] ${new Date().toISOString()} ${options.engine}-process-failed #${options.item.number} attempt=${attempt} ${priorError}`,
         );
       }
+      if (quota.exhausted) {
+        throw new CodexReviewError({
+          message: `${options.engine} review quota exhausted for #${options.item.number}: ${quota.reason}`,
+          status: result.status ?? null,
+          stdout,
+          stderr: result.stderr,
+          errorCode: codexProcessErrorCode(result.error),
+          signal: result.signal,
+          retryable: false,
+        });
+      }
       continue;
     }
     try {
-      return parseDecision(JSON.parse(extractJsonObject(stdout)), options.item);
+      const parsed = parseLocalModelDecisionOutput(stdout, options.item);
+      if (
+        parsed.repairSteps.length > 0 ||
+        parsed.parseError !== undefined ||
+        parsed.schemaError !== undefined
+      ) {
+        writeLocalModelJsonFailure({
+          workDir: options.workDir,
+          item: options.item,
+          engine: options.engine,
+          model: options.model,
+          attempt,
+          stdoutPath,
+          outcome: parsed.repairSteps.length > 0 ? "repaired" : "failed",
+          rawOutput: parsed.rawJson,
+          rawOutputKind: "json",
+          repairSteps: parsed.repairSteps,
+          ...(parsed.parsedJson ? { parsedJson: parsed.parsedJson } : {}),
+          ...(parsed.parseError ? { parseError: parsed.parseError } : {}),
+          ...(parsed.schemaError ? { schemaError: parsed.schemaError } : {}),
+        });
+      }
+      if (parsed.repairSteps.length > 0 && !options.quietLogs) {
+        console.error(
+          `[review] ${new Date().toISOString()} ${options.engine}-json-repaired #${
+            options.item.number
+          } attempt=${attempt} steps=${JSON.stringify(parsed.repairSteps)}`,
+        );
+      }
+      return parsed.decision;
     } catch (error) {
       priorError = error instanceof Error ? error.message : String(error);
+      try {
+        const rawOutput = extractJsonObject(stdout);
+        writeLocalModelJsonFailure({
+          workDir: options.workDir,
+          item: options.item,
+          engine: options.engine,
+          model: options.model,
+          attempt,
+          stdoutPath,
+          outcome: "failed",
+          rawOutput,
+          rawOutputKind: "json",
+          parseError: priorError,
+          repairSteps: [],
+        });
+      } catch {
+        writeLocalModelJsonFailure({
+          workDir: options.workDir,
+          item: options.item,
+          engine: options.engine,
+          model: options.model,
+          attempt,
+          stdoutPath,
+          outcome: "failed",
+          rawOutput: stdout,
+          rawOutputKind: "text",
+          parseError: priorError,
+          repairSteps: [],
+        });
+      }
       if (!options.quietLogs) {
         console.error(
           `[review] ${new Date().toISOString()} ${options.engine}-invalid-decision #${options.item.number} attempt=${attempt} ${priorError}`,
         );
+      }
+      if (shouldAbortStructuredRetry(options.engine, priorError)) {
+        throw new CodexReviewError({
+          message: `${options.engine} produced non-JSON review output for #${options.item.number}; preserved stdout at ${stdoutPath} and will not retry this metered engine.`,
+          status: null,
+          stdout,
+          stderr: "",
+          retryable: false,
+        });
       }
     }
   }
@@ -16629,6 +16967,12 @@ function runReviewWithEngine(options: {
     status: null,
     retryable: false,
   });
+}
+
+export function runReviewWithEngineForTest(
+  options: Parameters<typeof runReviewWithEngine>[0],
+): Decision {
+  return runReviewWithEngine(options);
 }
 
 // Offline local-range review: synthesize the Item + ItemContext from the local
@@ -17036,7 +17380,7 @@ function reviewCommand(args: Args): void {
               // chain); a quota error is also recorded so the ledger pre-check skips it
               // next time. The LAST engine propagates — and a single explicit `--engine X`
               // has only itself, so it fails normally, never silently routed elsewhere.
-              const wasQuota = recordEngineExhausted(eng, output, nowMs);
+              const wasQuota = recordEngineExhausted(eng, output, Date.now());
               notes.push(`${eng}: ${wasQuota ? "usage-exhausted (recorded)" : "failed"}`);
               if (i === cascade.length - 1) throw engineError;
               if (!humanLocalReview)

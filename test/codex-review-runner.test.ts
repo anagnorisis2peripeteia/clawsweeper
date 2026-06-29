@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -17,6 +18,7 @@ import {
   lowerCodexReasoningEffort,
   redactInternalCodexModel,
   runCodexForTest,
+  runReviewWithEngineForTest,
 } from "../dist/clawsweeper.js";
 import { closeDecision, item, tmpPrefix } from "./helpers.ts";
 
@@ -77,6 +79,259 @@ process.exit(1);
     else process.env.PATH = originalPath;
     if (originalDecision === undefined) delete process.env.CODEX_DECISION_JSON;
     else process.env.CODEX_DECISION_JSON = originalDecision;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runReviewWithEngine repairs local-model JSON and records a training sample", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "engine-work");
+  const binDir = join(root, "bin");
+  const outputFixture = join(root, "opencode-output.json");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const opencodePath = join(binDir, "opencode");
+  writeFileSync(
+    opencodePath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+process.stdout.write(fs.readFileSync(process.env.OPENCODE_OUTPUT_FIXTURE, "utf8"));
+`,
+  );
+  chmodSync(opencodePath, 0o755);
+
+  const modelDecision = closeDecision({
+    decision: "keep_open",
+    closeReason: "none",
+    confidence: "medium",
+    summary: "Keep open after local model review.",
+    bestSolution: "Ask a maintainer to verify the behavioral contract.",
+    closeComment: "",
+    workReason: "Maintainer verification is required.",
+  });
+  const {
+    featureShowcase,
+    overallCorrectness,
+    overallConfidenceScore,
+    fixedRelease,
+    fixedSha,
+    fixedAt,
+    closeComment,
+    workCandidate,
+    workConfidence,
+    workPriority,
+    workReason,
+    workPrompt,
+    workClusterRefs,
+    workValidation,
+    workLikelyFiles,
+    ...decisionPrefix
+  } = modelDecision;
+  const malformedDecision = {
+    ...decisionPrefix,
+    featureShowcase: {
+      ...featureShowcase,
+      overallCorrectness,
+      overallConfidenceScore,
+      fixedRelease,
+      fixedSha,
+      fixedAt,
+      closeComment,
+      workCandidate,
+      workConfidence,
+      workPriority,
+      workReason,
+      workPrompt,
+      workClusterRefs,
+      workValidation,
+      workLikelyFiles,
+    },
+  };
+  writeFileSync(outputFixture, JSON.stringify(malformedDecision, null, 2).slice(0, -1));
+
+  const previous = {
+    PATH: process.env.PATH,
+    OPENCODE_OUTPUT_FIXTURE: process.env.OPENCODE_OUTPUT_FIXTURE,
+    CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.OPENCODE_OUTPUT_FIXTURE = outputFixture;
+  process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS = "1";
+  try {
+    const decision = runReviewWithEngineForTest({
+      engine: "opencode",
+      item: item({ number: 83396 }),
+      model: "local/h100/qwen3-coder-next-ud-q6-xl:latest",
+      openclawDir,
+      basePrompt: "Return a review decision.",
+      timeoutMs: 10_000,
+      workDir,
+      quietLogs: true,
+    });
+
+    assert.equal(decision.decision, "keep_open");
+    assert.equal(decision.summary, "Keep open after local model review.");
+    const repairedPath = join(workDir, "83396.1.opencode.repaired.json");
+    assert.equal(existsSync(repairedPath), true);
+    const sample = JSON.parse(
+      readFileSync(join(workDir, "local-model-json-failures.jsonl"), "utf8").trim(),
+    ) as {
+      outcome: string;
+      parseError: string | null;
+      repairSteps: string[];
+      rawOutput: string;
+      repairedOutput: string;
+    };
+    assert.equal(sample.outcome, "repaired");
+    assert.match(sample.parseError ?? "", /Expected|Unterminated|JSON/i);
+    assert.ok(
+      sample.repairSteps.some((step) => step.includes("missing JSON delimiter")),
+      "missing delimiter repair step was not recorded",
+    );
+    assert.ok(
+      sample.repairSteps.some((step) =>
+        step.includes("hoisted featureShowcase.overallCorrectness"),
+      ),
+      "shape repair step was not recorded",
+    );
+    assert.match(sample.rawOutput, /overallCorrectness/);
+    assert.match(sample.repairedOutput, /"overallCorrectness": "not a patch"/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runReviewWithEngine preserves non-JSON metered output without retrying", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "engine-work");
+  const binDir = join(root, "bin");
+  const callsPath = join(root, "agy-calls.txt");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const agyPath = join(binDir, "agy");
+  writeFileSync(
+    agyPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.AGY_CALLS_PATH, "call\\n");
+process.stdout.write("I need to inspect the repository first. Let me check the diff.\\n");
+`,
+  );
+  chmodSync(agyPath, 0o755);
+
+  const previous = {
+    PATH: process.env.PATH,
+    AGY_CALLS_PATH: process.env.AGY_CALLS_PATH,
+    CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS,
+    CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS:
+      process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.AGY_CALLS_PATH = callsPath;
+  process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS = "3";
+  delete process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS;
+  try {
+    assert.throws(
+      () =>
+        runReviewWithEngineForTest({
+          engine: "agy-claude",
+          item: item({ number: 83397 }),
+          model: "Claude Opus 4.6 (Thinking)",
+          openclawDir,
+          basePrompt: "Return a review decision.",
+          timeoutMs: 10_000,
+          workDir,
+          quietLogs: true,
+        }),
+      /produced non-JSON review output/,
+    );
+
+    assert.equal(readFileSync(callsPath, "utf8"), "call\n");
+    assert.equal(existsSync(join(workDir, "83397.2.agy-claude.stdout.log")), false);
+    const sample = JSON.parse(
+      readFileSync(join(workDir, "local-model-json-failures.jsonl"), "utf8").trim(),
+    ) as { rawOutputKind: string; parseError: string | null; rawOutput: string };
+    assert.equal(sample.rawOutputKind, "text");
+    assert.match(sample.parseError ?? "", /no JSON object/);
+    assert.match(sample.rawOutput, /inspect the repository/);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runReviewWithEngine aborts metered retries on quota logs", () => {
+  const root = mkdtempSync(tmpPrefix);
+  const openclawDir = join(root, "openclaw");
+  const workDir = join(root, "engine-work");
+  const binDir = join(root, "bin");
+  const callsPath = join(root, "agy-calls.txt");
+  mkdirSync(openclawDir, { recursive: true });
+  mkdirSync(binDir, { recursive: true });
+  execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
+  const agyPath = join(binDir, "agy");
+  writeFileSync(
+    agyPath,
+    `#!/usr/bin/env node
+const fs = require("node:fs");
+fs.appendFileSync(process.env.AGY_CALLS_PATH, "call\\n");
+const logIndex = process.argv.indexOf("--log-file");
+if (logIndex !== -1) {
+  fs.writeFileSync(
+    process.argv[logIndex + 1],
+    "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 4h43m42s.\\n",
+  );
+}
+process.exit(1);
+`,
+  );
+  chmodSync(agyPath, 0o755);
+
+  const previous = {
+    PATH: process.env.PATH,
+    AGY_CALLS_PATH: process.env.AGY_CALLS_PATH,
+    CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS,
+    CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS:
+      process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS,
+  };
+  process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
+  process.env.AGY_CALLS_PATH = callsPath;
+  process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS = "3";
+  process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS = "3";
+  try {
+    assert.throws(
+      () =>
+        runReviewWithEngineForTest({
+          engine: "agy-claude",
+          item: item({ number: 83398 }),
+          model: "Claude Opus 4.6 (Thinking)",
+          openclawDir,
+          basePrompt: "Return a review decision.",
+          timeoutMs: 10_000,
+          workDir,
+          quietLogs: true,
+        }),
+      /quota exhausted/,
+    );
+
+    assert.equal(readFileSync(callsPath, "utf8"), "call\n");
+    assert.equal(existsSync(join(workDir, "83398.2.agy-claude.stdout.log")), false);
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });

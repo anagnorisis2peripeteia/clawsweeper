@@ -256,12 +256,15 @@ test("--local-range does not host-download proof video URLs from the body", asyn
   const port = (server.address() as { port: number }).port;
   const dir = initRepo();
   const codexDir = mkdtempSync(join(tmpdir(), "lrr-codex-"));
-  const fakeCodex = join(codexDir, process.platform === "win32" ? "fake-codex.cmd" : "fake-codex.sh");
+  const fakeCodex = join(
+    codexDir,
+    process.platform === "win32" ? "fake-codex.cmd" : "fake-codex.sh",
+  );
   const fakeCodexMarker = join(codexDir, "fake-codex-ran.txt");
   writeFileSync(
     fakeCodex,
     process.platform === "win32"
-      ? "@echo off\r\necho ran>\"%FAKE_CODEX_MARKER%\"\r\nexit /b 1\r\n"
+      ? '@echo off\r\necho ran>"%FAKE_CODEX_MARKER%"\r\nexit /b 1\r\n'
       : '#!/bin/sh\nprintf "ran\\n" > "$FAKE_CODEX_MARKER"\nexit 1\n',
   );
   if (process.platform !== "win32") chmodSync(fakeCodex, 0o755);
