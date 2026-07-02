@@ -596,3 +596,24 @@ test("root-cause report parsing defaults legacy and malformed reports safely", (
     valid,
   );
 });
+
+test("local model json repair strips a dangling string fragment before a closing delimiter", async () => {
+  const { parseLocalModelDecisionOutputForTest } = await import("../dist/clawsweeper.js");
+  const good = JSON.stringify(closeDecision());
+  // The observed claude-lane glitch (2026-07-02): a dangling `,"` emitted right
+  // before a closing brace — `"...value.","}` — one token of corruption mid-output.
+  const glitched = good.replace(/}$/, ',"}');
+  assert.notEqual(glitched, good);
+  assert.throws(() => JSON.parse(glitched));
+  const decision = parseLocalModelDecisionOutputForTest(glitched, item());
+  assert.equal(decision.decision, "close");
+});
+
+test("local model json repair never mangles VALID json whose string values end in a comma", async () => {
+  const { parseLocalModelDecisionOutputForTest } = await import("../dist/clawsweeper.js");
+  // `"summary":"...comma,"}` contains the byte sequence `,"}`, which the dangling-
+  // fragment repair would strip — but the unrepaired candidate parses first and wins.
+  const good = JSON.stringify(closeDecision({ summary: "valid string ending in a comma," }));
+  const decision = parseLocalModelDecisionOutputForTest(good, item());
+  assert.equal(decision.summary, "valid string ending in a comma,");
+});

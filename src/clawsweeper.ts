@@ -16546,17 +16546,29 @@ export function parseLocalModelDecisionOutputForTest(stdout: string, item: Item)
 
 function localModelJsonCandidates(rawJson: string): LocalModelJsonCandidate[] {
   const candidates: LocalModelJsonCandidate[] = [{ text: rawJson, repairSteps: [] }];
-  const withoutTrailingCommas = rawJson.replace(/,\s*([}\]])/g, "$1");
+  // A dangling `,"` immediately before a closing delimiter (`"...value.","}`) is a
+  // single-token glitch even strong models emit mid-long-output (seen from the claude
+  // lane 2026-07-02). A lone `,"}`/`,"]` is never valid JSON, and a wrong repair
+  // self-rejects at the JSON.parse/schema validation below, so this is safe to strip.
+  const withoutDanglingFragments = rawJson.replace(/,\s*"\s*([}\]])/g, "$1");
+  const danglingFragmentSteps =
+    withoutDanglingFragments === rawJson
+      ? []
+      : ["removed dangling string fragment before closing delimiters"];
+  const withoutTrailingCommas = withoutDanglingFragments.replace(/,\s*([}\]])/g, "$1");
   const trailingCommaSteps =
-    withoutTrailingCommas === rawJson ? [] : ["removed trailing commas before closing delimiters"];
+    withoutTrailingCommas === withoutDanglingFragments
+      ? []
+      : ["removed trailing commas before closing delimiters"];
+  const preBalanceSteps = [...danglingFragmentSteps, ...trailingCommaSteps];
   const balanced = balanceLocalModelJsonDelimiters(withoutTrailingCommas);
   if (balanced.text !== rawJson) {
     candidates.push({
       text: balanced.text,
-      repairSteps: [...trailingCommaSteps, ...balanced.repairSteps],
+      repairSteps: [...preBalanceSteps, ...balanced.repairSteps],
     });
-  } else if (trailingCommaSteps.length > 0) {
-    candidates.push({ text: withoutTrailingCommas, repairSteps: trailingCommaSteps });
+  } else if (preBalanceSteps.length > 0) {
+    candidates.push({ text: withoutTrailingCommas, repairSteps: preBalanceSteps });
   }
   return candidates;
 }
@@ -16776,14 +16788,18 @@ function reviewEngineAttemptLimit(engine: ReviewEngine): number {
     Math.max(1, Number.isFinite(configuredAttempts) ? Math.floor(configuredAttempts) : 3),
   );
   if (engine === "opencode") return defaultAttempts;
+  // Metered engines get ONE retry-on-parse by default (2 attempts): the re-ask feeds
+  // the parse error back into the prompt, and the second call only happens after a
+  // failure — a bounded extra spend that beats failing the whole gate on a one-token
+  // JSON glitch (claude lane, 2026-07-02). Override via env to tighten/loosen.
   const configuredMeteredAttempts = Number(
-    process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS ?? 1,
+    process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS ?? 2,
   );
   const meteredAttempts = Math.min(
     5,
     Math.max(
       1,
-      Number.isFinite(configuredMeteredAttempts) ? Math.floor(configuredMeteredAttempts) : 1,
+      Number.isFinite(configuredMeteredAttempts) ? Math.floor(configuredMeteredAttempts) : 2,
     ),
   );
   return Math.min(defaultAttempts, meteredAttempts);
