@@ -2727,7 +2727,11 @@ function parseMantisRecommendation(value: unknown, path: string): MantisRecommen
     status: requireEnum(record.status, MANTIS_RECOMMENDATION_STATUSES, `${path}.status`),
     scenario: requireEnum(record.scenario, MANTIS_RECOMMENDATION_SCENARIOS, `${path}.scenario`),
     reason: requireString(record.reason, `${path}.reason`),
-    maintainerComment: requireString(record.maintainerComment, `${path}.maintainerComment`),
+    // Engines reasonably emit null/omit when there is no maintainer comment;
+    // coerce to the empty string instead of failing the whole decision.
+    maintainerComment: record.maintainerComment == null
+      ? ""
+      : requireString(record.maintainerComment, `${path}.maintainerComment`),
   };
 }
 
