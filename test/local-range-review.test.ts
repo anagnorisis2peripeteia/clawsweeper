@@ -308,6 +308,10 @@ test("--local-range does not host-download proof video URLs from the body", asyn
           CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: "1",
           CODEX_BIN: fakeCodex,
           FAKE_CODEX_MARKER: fakeCodexMarker,
+          // Hermetic ledger: the developer's real ~/.clawsweeper-engine-usage.json may
+          // record codex as genuinely maxed, which would make the CLI skip the stubbed
+          // engine and this test fail spuriously (bit us 2026-07-02).
+          CLAWSWEEPER_ENGINE_USAGE_FILE: join(codexDir, "engine-usage.json"),
         },
         timeout: 60000,
       },

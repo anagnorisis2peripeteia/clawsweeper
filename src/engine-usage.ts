@@ -8,7 +8,12 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const ENGINE_USAGE_LEDGER_PATH = join(homedir(), ".clawsweeper-engine-usage.json");
+// CLAWSWEEPER_ENGINE_USAGE_FILE overrides the ledger location — primarily so tests
+// that spawn the real CLI stay hermetic (the developer's live ledger recording a
+// genuinely-maxed engine must not make stubbed-engine tests skip that engine).
+export const ENGINE_USAGE_LEDGER_PATH =
+  process.env.CLAWSWEEPER_ENGINE_USAGE_FILE?.trim() ||
+  join(homedir(), ".clawsweeper-engine-usage.json");
 
 export interface EngineUsageEntry {
   exhaustedAt: string;
