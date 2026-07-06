@@ -74,6 +74,11 @@ export function runCodexProcess(options: {
   env: NodeJS.ProcessEnv;
   input: string;
   timeoutMs: number;
+  // Optional binary override; defaults to the resolved codex command. The offline
+  // `external` review engine sets this to an operator-named read-only CLI so it runs
+  // through the SAME bounded worker (timeout, output capture, scrubbed env). The worker
+  // applies cross-platform resolution via spawnCodex (CODEX_BIN), so any binary works.
+  command?: string;
   tailBytes?: number;
   outputFileBytes?: number;
   stdoutPath?: string;
@@ -90,7 +95,7 @@ export function runCodexProcess(options: {
       optionsPath,
       JSON.stringify({
         args: [...options.args],
-        command: codexProcessCommand(options.env),
+        command: options.command ?? codexProcessCommand(options.env),
         timeoutMs: options.timeoutMs,
         resultPath,
         stdoutPath,

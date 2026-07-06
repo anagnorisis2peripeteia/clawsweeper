@@ -33,6 +33,13 @@ import {
 } from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
 import {
+  EXTERNAL_ARGV_MAX_DIFF_BYTES,
+  EXTERNAL_ENGINE_ID,
+  externalEngineSpecFromFlags,
+  planExternalRun,
+  type ExternalEngineSpec,
+} from "./external-engine.js";
+import {
   codexJsonlFailureDetail,
   codexRetryDelayMs,
   codexTerminalErrorDetail,
@@ -7722,6 +7729,195 @@ export function makeTreeReadOnlyForTest(path: string): FileModeSnapshot[] {
 
 export function restoreTreeModesForTest(snapshots: readonly FileModeSnapshot[]): void {
   restoreTreeModes(snapshots);
+}
+
+// Offline `external` engine for the structured Decision path (review --local-range only).
+// Drives the operator-named schema-capable CLI through the SAME bounded worker + offline
+// envelope as codex, then reads the schema-constrained Decision it emits — from {outputFile}
+// if the CLI wrote one (codex `--output-last-message`), else from stdout (e.g. claude
+// `--output-format json` envelope). Any missing/malformed output becomes a clean, visible
+// failure Decision; it never guesses a decision. Provider-neutral, no engine defaults.
+// Deterministic bridge: wrap an external engine's markdown review into a valid, benign
+// advisory Decision for `review --local-range`. External engines report prose, not the
+// mantis schema — so the verdict is always `keep_open` (a pre-PR advisory closes nothing),
+// the engine's markdown is carried in `summary` + `evidence` so it renders in the report,
+// and the structured sub-assessments are left neutral / "not extracted" rather than invented.
+function externalAdvisoryDecision(reviewMarkdown: string, engineName: string): Decision {
+  const review = reviewMarkdown.trim() || `${engineName} produced no review output.`;
+  const note = `Not separately extracted — the external \`${engineName}\` engine reported a markdown advisory (see summary), not the structured mantis schema.`;
+  return {
+    decision: "keep_open",
+    closeReason: "none",
+    confidence: "low",
+    summary: trimMiddle(review, 50_000),
+    changeSummary: `Advisory markdown review from the external \`${engineName}\` engine (offline --local-range).`,
+    evidence: [
+      evidenceEntry({ label: `${engineName} advisory review`, detail: trimMiddle(review, 8000) }),
+    ],
+    likelyOwners: [],
+    risks: [],
+    bestSolution: "See the advisory review in the summary.",
+    maintainerDecision: emptyMaintainerDecision(),
+    triagePriority: "none",
+    impactLabels: [],
+    mergeRiskLabels: [],
+    maturityLabels: [],
+    mergeRiskOptions: [],
+    reviewMetrics: [],
+    labelJustifications: [],
+    itemCategory: "unclear",
+    reproductionStatus: "unclear",
+    reproductionConfidence: "low",
+    requiresNewFeature: false,
+    requiresNewConfigOption: false,
+    requiresProductDecision: false,
+    reproductionAssessment: note,
+    solutionAssessment: note,
+    visionFit: "not_applicable",
+    visionFitReason: note,
+    visionFitEvidence: [],
+    implementationComplexity: "not_applicable",
+    autoImplementationCandidate: "none",
+    rootCauseCluster: defaultRootCauseCluster(),
+    agentsPolicyStatus: {
+      found: false,
+      readFully: false,
+      applied: false,
+      status: "unreadable_or_unclear",
+      summary: note,
+    },
+    reviewFindings: [],
+    securityReview: { status: "not_applicable", summary: note, concerns: [] },
+    realBehaviorProof: {
+      status: "not_applicable",
+      summary: note,
+      evidenceKind: "not_applicable",
+      needsContributorAction: false,
+    },
+    prRating: { proofTier: "NA", patchTier: "NA", overallTier: "NA", summary: note, nextSteps: [] },
+    telegramVisibleProof: { status: "not_needed", summary: note },
+    mantisRecommendation: {
+      status: "not_recommended",
+      scenario: "none",
+      reason: note,
+      maintainerComment: "",
+    },
+    featureShowcase: { status: "none", reason: note },
+    overallCorrectness: "not a patch",
+    overallConfidenceScore: 0,
+    codexTerminalFailure: false,
+    fixedRelease: null,
+    fixedSha: null,
+    fixedAt: null,
+    fixedPullRequest: null,
+    closeComment: "",
+    workCandidate: "none",
+    workConfidence: "low",
+    workPriority: "low",
+    workReason: "External advisory review — no work-lane recommendation extracted.",
+    workPrompt: "",
+    workClusterRefs: [],
+    workValidation: [],
+    workLikelyFiles: [],
+  };
+}
+
+// Markdown-review prompt for the `external` engine. External engines report MARKDOWN, so we
+// ASK for markdown (findings/risks/fixes) with the committed range embedded — NOT the codex
+// mantis-decision prompt, which makes single-shot engines emit JSON and agentic ones emit
+// schema-ignoring prose. Codex keeps its own structured prompt untouched.
+function externalMarkdownReviewPrompt(
+  item: Item,
+  context: ItemContext,
+  additionalPrompt: string,
+): string {
+  const files = Array.isArray(context.pullFiles) ? context.pullFiles : [];
+  let diff = files
+    .map((entry) => {
+      const f = entry as { filename?: string; status?: string; patch?: string };
+      return `### ${f.status ?? "?"} ${f.filename ?? "(unknown file)"}\n\n\`\`\`diff\n${f.patch ?? ""}\n\`\`\``;
+    })
+    .join("\n\n");
+  if (diff.length > EXTERNAL_ARGV_MAX_DIFF_BYTES) {
+    diff = `${diff.slice(0, EXTERNAL_ARGV_MAX_DIFF_BYTES)}\n...(diff truncated at ${EXTERNAL_ARGV_MAX_DIFF_BYTES} bytes)...`;
+  }
+  const title = item.title ? ` ("${item.title}")` : "";
+  return `${additionalPrompt}
+
+You are giving a pre-PR ADVISORY review of a committed local change range in ${item.repo}${title}. Review the change below for correctness bugs, risks, security issues, and concrete things to fix. Be specific and concise; skip praise.
+
+## Changed files (committed range)
+${diff || "(no file changes detected)"}
+
+Return ONLY a human-readable Markdown review — findings, risks, and suggested fixes. Do NOT output JSON, and do NOT wrap the whole report in a code fence.`;
+}
+
+// Offline `external` engine for `review --local-range` (only). Runs the operator-named CLI
+// through the same bounded worker + offline envelope as codex, captures its MARKDOWN review,
+// and deterministically bridges it into a benign advisory Decision — no schema for the engine
+// to satisfy, no second call. Provider-neutral; ships with no engine defaults.
+function runExternalDecision(options: {
+  item: Item;
+  prompt: string;
+  spec: ExternalEngineSpec;
+  workDir: string;
+  cwd: string;
+}): Decision {
+  const { spec, item } = options;
+  // codex creates this dir as a side-effect of its proof-scratch setup; the external path
+  // has none, so ensure it exists before writing logs into it.
+  ensureDir(options.workDir);
+  let promptFilePath = "";
+  if (spec.promptDelivery === "file") {
+    promptFilePath = join(options.workDir, `${item.number}.external.prompt.md`);
+    writeFileSync(promptFilePath, options.prompt, "utf8");
+  }
+  const plan = planExternalRun(spec, options.prompt, { promptFile: promptFilePath });
+  const stdoutPath = join(options.workDir, `${item.number}.external.stdout.log`);
+  const stderrPath = join(options.workDir, `${item.number}.external.stderr.log`);
+  const result = runCodexProcess({
+    command: plan.command,
+    args: plan.args,
+    cwd: options.cwd,
+    env: codexEnv(),
+    input: plan.input,
+    timeoutMs: spec.timeoutMs,
+    stdoutPath,
+    stderrPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  const stderr = existsSync(stderrPath) ? readFileSync(stderrPath, "utf8") : result.stderr;
+  // Failures THROW CodexReviewError (exactly like the codex path) so the review command's
+  // failure counter (`codexFailures`) and nonzero exit propagate — a *returned* failure
+  // Decision would produce failed-review content but silently pass the command's accounting.
+  if (result.error || result.status !== 0) {
+    const detail =
+      result.error instanceof Error
+        ? `${spec.command} review failed: ${result.error.message}`
+        : `${spec.command} review exited ${result.status ?? "unknown"}`;
+    throw new CodexReviewError({
+      message: detail,
+      status: result.status ?? null,
+      stdout,
+      stderr,
+      errorCode: codexProcessErrorCode(result.error),
+      signal: result.signal,
+      retryable: false,
+    });
+  }
+  // An engine that exits 0 but produces NO review output did not actually review — also a
+  // FAILED review (thrown, so it trips the same accounting), not a benign advisory.
+  if (!stdout.trim()) {
+    throw new CodexReviewError({
+      message: `${spec.command} exited 0 but produced no review output`,
+      status: result.status ?? null,
+      stdout,
+      stderr,
+      retryable: false,
+    });
+  }
+  // Deterministic bridge: the engine's markdown review => a benign advisory Decision.
+  return externalAdvisoryDecision(stdout, spec.command);
 }
 
 export function runCodexForTest(options: Parameters<typeof runCodex>[0]): Decision {
@@ -17479,6 +17675,37 @@ function reviewCommand(args: Args): void {
   const sandboxMode = stringArg(args.codex_sandbox, "read-only");
   const serviceTier = stringArg(args.codex_service_tier, localOnly ? "fast" : DEFAULT_SERVICE_TIER);
   const timeoutMs = numberArg(args.codex_timeout_ms, DEFAULT_REVIEW_CODEX_TIMEOUT_MS);
+
+  // Engine selection: codex (default, unchanged) or the provider-neutral `external` CLI
+  // engine. `external` is restricted to --local-range (offline, operator-local pre-PR
+  // review) — it never runs in the live-PR / automation path.
+  const engine = stringArg(args.engine, "codex");
+  if (engine !== "codex" && engine !== EXTERNAL_ENGINE_ID) {
+    console.error(`[review] --engine must be "codex" or "${EXTERNAL_ENGINE_ID}", got "${engine}"`);
+    process.exit(1);
+  }
+  if (engine === EXTERNAL_ENGINE_ID && !localRange) {
+    console.error(
+      `[review] --engine ${EXTERNAL_ENGINE_ID} is only supported with --local-range (offline pre-PR review).`,
+    );
+    process.exit(1);
+  }
+  let externalSpec: ExternalEngineSpec | null = null;
+  if (engine === EXTERNAL_ENGINE_ID) {
+    try {
+      externalSpec = externalEngineSpecFromFlags({
+        command: stringArg(args.external_cmd, ""),
+        argsJson: stringArg(args.external_args, ""),
+        promptDelivery: stringArg(args.external_prompt, "stdin"),
+        model: stringArg(args.external_model, ""),
+        timeoutMs: numberArg(args.external_timeout_ms, 1_800_000),
+      });
+    } catch (error) {
+      console.error(`[review] ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  }
+
   let additionalPrompt = stringArg(
     args.additional_prompt,
     process.env.CLAWSWEEPER_ADDITIONAL_PROMPT ?? "",
@@ -17692,26 +17919,35 @@ function reviewCommand(args: Args): void {
             `  stderr: ${displayPath(join(codexWorkDir, `${item.number}.1.codex.stderr.log`))}`,
           );
         }
-        decision = runCodex({
-          item,
-          context,
-          git,
-          model,
-          openclawDir,
-          reasoningEffort,
-          sandboxMode,
-          serviceTier,
-          forcedLoginMethod,
-          preserveCodexAuth: localOnly,
-          preferWindowsAppBinary: localOnly,
-          timeoutMs,
-          workDir: codexWorkDir,
-          additionalPrompt,
-          proofScratchDir,
-          prompt: prompt.text,
-          quietLogs: humanLocalReview,
-          ...(localRange ? { extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG] } : {}),
-        });
+        decision =
+          engine === EXTERNAL_ENGINE_ID
+            ? runExternalDecision({
+                item,
+                prompt: externalMarkdownReviewPrompt(item, context, additionalPrompt),
+                spec: externalSpec as ExternalEngineSpec,
+                workDir: codexWorkDir,
+                cwd: openclawDir,
+              })
+            : runCodex({
+                item,
+                context,
+                git,
+                model,
+                openclawDir,
+                reasoningEffort,
+                sandboxMode,
+                serviceTier,
+                forcedLoginMethod,
+                preserveCodexAuth: localOnly,
+                preferWindowsAppBinary: localOnly,
+                timeoutMs,
+                workDir: codexWorkDir,
+                additionalPrompt,
+                proofScratchDir,
+                prompt: prompt.text,
+                quietLogs: humanLocalReview,
+                ...(localRange ? { extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG] } : {}),
+              });
       } catch (error) {
         codexFailures += 1;
         codexFailed = true;

@@ -273,6 +273,45 @@ disables Codex web search, and explicitly forbids network lookups. Repositories
 without a configured profile are rejected (no foreign-profile fallback). Unlike the
 hosted lane it never writes to GitHub — the local Markdown report is the only output.
 
+### Non-codex engines (`--engine`)
+
+Both offline local-review paths — `commit-sweeper local-review` and
+`clawsweeper review --local-range` — default to `--engine codex` but accept an opt-in,
+provider-neutral **`external`** engine that drives any read-only CLI through the same
+bounded, offline runner (scrubbed credentials, empty `GH_CONFIG_DIR`, clean committed
+range). No providers are built in — you point it at your own CLI with inline flags:
+
+- `--external-cmd <bin>` — the read-only review CLI to run
+- `--external-args '<JSON array>'` — its argument template; the tokens `{prompt}`,
+  `{promptFile}`, and `{model}` are substituted
+- `--external-prompt stdin|argv|file` — how the review prompt reaches the CLI (default `stdin`)
+- `--external-model <model>` — substituted into a `{model}` token (optional)
+- `--external-timeout-ms <n>` — per-run timeout (default 30 min)
+
+The external engine reports a **Markdown** review. On `local-review` that markdown is the
+report; on `review --local-range` it is deterministically bridged into a benign advisory
+Decision (verdict `keep_open` — a pre-PR advisory closes nothing) whose summary carries the
+review. On the `review` command, `external` is restricted to `--local-range`; it never runs
+in the hosted/apply path. Codex remains the default and the only engine any automation uses.
+
+Example recipes (adjust for your CLI version):
+
+```bash
+# claude — prompt on stdin, its own read tools for exploration
+clawsweeper review --local-range --engine external --external-cmd claude \
+  --external-args '["-p","--output-format","text","--allowedTools","Read,Grep,Glob"]' \
+  --external-prompt stdin
+
+# agy — prompt as the trailing argv after --print
+clawsweeper review --local-range --engine external --external-cmd agy \
+  --external-args '["--model","{model}","--sandbox","--print"]' \
+  --external-model "Gemini 3.1 Pro (High)" --external-prompt argv
+
+# opencode — read-only plan agent
+clawsweeper review --local-range --engine external --external-cmd opencode \
+  --external-args '["run","--agent","plan"]' --external-prompt argv
+```
+
 ## Enable / Disable
 
 Target repositories can disable hook-based dispatch with:

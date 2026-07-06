@@ -21,6 +21,13 @@ import { argBool, argNumber, argString, parseArgs, type Args } from "./clawsweep
 import { safeOutputTail } from "./clawsweeper-text.js";
 import { codexEnv, codexLoginConfig, codexModelArgs, PUBLIC_CODEX_MODEL } from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
+import {
+  EXTERNAL_ENGINE_ID,
+  externalDiffCap,
+  externalEngineSpecFromFlags,
+  planExternalRun,
+  type ExternalEngineSpec,
+} from "./external-engine.js";
 import { runText } from "./command.js";
 import { ghRetryKind, ghRetryWaitMs } from "./github-retry.js";
 import {
@@ -453,6 +460,125 @@ export function localReviewAdditionalPrompt(
   return `This is a LOCAL pre-PR review of the COMMITTED range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)} (your branch vs ${baseBranch}) on a clean checkout — no staged or untracked changes. Review code correctness, bugs, and security; ignore PR metadata. This review is offline: do not run gh, use web search, access URLs, or make any network request. Use only the local checkout and git history.`;
 }
 
+// Build the read-only range-review prompt for the `external` engine: the base commit
+// prompt plus the embedded committed-range diff (capped), since a read-only CLI can't
+// shell out to inspect the range itself. Provider-neutral — no engine specifics here.
+function promptForReadOnlyRangeReview(options: {
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  additionalPrompt: string;
+  maxDiffBytes: number;
+}): { prompt: string } | { detail: string } {
+  let rawDiff: string;
+  try {
+    rawDiff = run("git", ["diff", `${options.baseSha}..${options.sha}`], {
+      cwd: options.targetDir,
+    });
+  } catch (error) {
+    return {
+      detail: `failed to read range diff: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const diff =
+    rawDiff.length > options.maxDiffBytes
+      ? `${rawDiff.slice(0, options.maxDiffBytes)}\n...(diff truncated at ${options.maxDiffBytes} bytes)...`
+      : rawDiff;
+  return {
+    prompt: `${promptForCommit({
+      targetDir: options.targetDir,
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      additionalPrompt: options.additionalPrompt,
+    })}
+
+## Full Range Diff (\`${options.baseSha}..${options.sha}\`)
+
+\`\`\`diff
+${diff || "(empty diff)"}
+\`\`\`
+
+Return only the Markdown report. Start the response with \`---\`; do not add a preamble or wrap the report in a code fence.
+`,
+  };
+}
+
+// Local-review `external` engine: drive the operator-named read-only CLI through the
+// SAME bounded runner and offline envelope as codex (credentials scrubbed via codexEnv,
+// empty GH_CONFIG_DIR, clean committed range). Opt-in only, ships with no provider
+// defaults. The prompt is delivered by stdin / argv / temp file per the spec; the
+// engine's markdown report is returned (or a failure report on error / timeout / empty).
+function runExternalEngineReview(options: {
+  spec: ExternalEngineSpec;
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const { spec } = options;
+  const fail = (detail: string, timeout: boolean): string =>
+    failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail,
+      timeout,
+    });
+
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: externalDiffCap(spec.promptDelivery),
+  });
+  if ("detail" in prompt) return fail(prompt.detail, false);
+
+  let promptFilePath = "";
+  if (spec.promptDelivery === "file") {
+    promptFilePath = join(options.workDir, "external-prompt.txt");
+    writeFileSync(promptFilePath, prompt.prompt, "utf8");
+  }
+  const plan = planExternalRun(spec, prompt.prompt, { promptFile: promptFilePath });
+
+  // Capture the FULL stdout (not the runner's truncated tail) so a large report's
+  // leading YAML front matter is never cut off.
+  const stdoutPath = join(options.workDir, "external-stdout.log");
+  const result = runCodexProcess({
+    command: plan.command,
+    args: plan.args,
+    cwd: options.targetDir,
+    env: codexEnv(),
+    input: plan.input,
+    timeoutMs: spec.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return fail(detail.trim(), timeout);
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) return fail(`${spec.command} produced no output`, false);
+  return markdown;
+}
+
 // Local, offline pre-PR review of a whole branch: reviews the committed range
 // merge-base(base, HEAD)..HEAD as a single unit, reusing the Commit Sweeper engine.
 // Conforms to the #253 replacement spec: clean checkout, unique run dir, no GitHub
@@ -460,6 +586,33 @@ export function localReviewAdditionalPrompt(
 function localReviewCommand(args: Args): void {
   const targetDir = resolve(argString(args, "target_dir", "."));
   const baseBranch = argString(args, "base", "main");
+
+  // Engine selection: `codex` (default, unchanged) or the provider-neutral `external`
+  // CLI engine. Validated up front — before any run state or git work — so a usage
+  // error fails fast and cleanly.
+  const engine = argString(args, "engine", "codex");
+  if (engine !== "codex" && engine !== EXTERNAL_ENGINE_ID) {
+    console.error(
+      `[local-review] --engine must be "codex" or "${EXTERNAL_ENGINE_ID}", got "${engine}"`,
+    );
+    process.exit(1);
+  }
+  let externalSpec: ExternalEngineSpec | null = null;
+  if (engine === EXTERNAL_ENGINE_ID) {
+    try {
+      externalSpec = externalEngineSpecFromFlags({
+        command: argString(args, "external_cmd", ""),
+        argsJson: argString(args, "external_args", ""),
+        promptDelivery: argString(args, "external_prompt", "stdin"),
+        model: argString(args, "external_model", ""),
+        timeoutMs: argNumber(args, "external_timeout_ms", 1_800_000),
+      });
+    } catch (error) {
+      console.error(`[local-review] ${error instanceof Error ? error.message : String(error)}`);
+      process.exit(1);
+    }
+  }
+
   const reportDir = resolve(
     argString(args, "report_dir", join(homedir(), ".clawsweeper-local-reviews")),
   );
@@ -517,24 +670,36 @@ function localReviewCommand(args: Args): void {
     `[local-review] repo=${targetRepo} profile=${profileSlug} base=${baseBranch} range=${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`,
   );
 
-  const markdown = ensureCommitReportTimestamps(
-    runCodex({
-      targetDir,
-      targetRepo,
-      sha: headSha,
-      baseSha,
-      metadata,
-      model: argString(args, "codex_model", DEFAULT_CODEX_MODEL),
-      reasoningEffort: argString(args, "codex_reasoning_effort", DEFAULT_REASONING_EFFORT),
-      sandboxMode: argString(args, "codex_sandbox", "read-only"),
-      serviceTier: argString(args, "codex_service_tier", DEFAULT_SERVICE_TIER),
-      timeoutMs: argNumber(args, "codex_timeout_ms", 1_800_000),
-      workDir: runDir,
-      additionalPrompt,
-      extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
-    }),
-    metadata,
-  );
+  const markdown =
+    engine === EXTERNAL_ENGINE_ID
+      ? runExternalEngineReview({
+          spec: externalSpec as ExternalEngineSpec,
+          targetDir,
+          targetRepo,
+          sha: headSha,
+          baseSha,
+          metadata,
+          workDir: runDir,
+          additionalPrompt,
+        })
+      : ensureCommitReportTimestamps(
+          runCodex({
+            targetDir,
+            targetRepo,
+            sha: headSha,
+            baseSha,
+            metadata,
+            model: argString(args, "codex_model", DEFAULT_CODEX_MODEL),
+            reasoningEffort: argString(args, "codex_reasoning_effort", DEFAULT_REASONING_EFFORT),
+            sandboxMode: argString(args, "codex_sandbox", "read-only"),
+            serviceTier: argString(args, "codex_service_tier", DEFAULT_SERVICE_TIER),
+            timeoutMs: argNumber(args, "codex_timeout_ms", 1_800_000),
+            workDir: runDir,
+            additionalPrompt,
+            extraCodexConfig: [LOCAL_REVIEW_WEB_SEARCH_CONFIG],
+          }),
+          metadata,
+        );
 
   const outputPath = join(runDir, "local-review.md");
   writeFileSync(outputPath, markdown.endsWith("\n") ? markdown : `${markdown}\n`, "utf8");
