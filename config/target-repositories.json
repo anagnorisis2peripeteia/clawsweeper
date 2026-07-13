@@ -82,6 +82,19 @@
       "package_manager": "npm",
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "target_repo": "anagnorisis2peripeteia/agent-skills",
+      "display_name": "Agent Skills",
+      "checkout_dir": "agent-skills",
+      "prompt_note": "Personal skill and plugin repository — LOCAL review only. Apply the checkout README and review lifecycle changes conservatively. For Issue Loop, enforce fail-closed publication, sanitized persistence, duplicate-aware reporting, stable runtime convergence, and transactional watcher rollback. Never auto-close or comment from local review.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": null,
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "generic_fallbacks": [
