@@ -1441,6 +1441,15 @@ test("mutation actor guard accepts only trusted bot identities", () => {
   assert.equal(isAllowedMutationActor("github-actions[bot]", trustedBots), false);
 });
 
+test("normalizeGitHubActor is idempotent for repeated [bot] suffixes", () => {
+  // Single-suffix strip left a residual on a doubled suffix, so a second pass changed it.
+  assert.equal(normalizeGitHubActor("x[bot][bot]"), "x");
+  const once = normalizeGitHubActor("x[bot][bot]");
+  assert.equal(normalizeGitHubActor(once), once);
+  // Unregressed: a single real bot suffix still strips exactly once.
+  assert.equal(normalizeGitHubActor("foo[bot]"), "foo");
+});
+
 test("mutation actor guard recognizes GitHub App integration auth shape", () => {
   assert.equal(
     isGitHubAppIntegrationAuthError("gh: Resource not accessible by integration (HTTP 403)"),

@@ -419,10 +419,14 @@ export function isAllowedMutationActor(login: JsonValue, trustedBots: Iterable<s
 }
 
 export function normalizeGitHubActor(login: JsonValue) {
-  return String(login ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/\[bot\]$/i, "");
+  return (
+    String(login ?? "")
+      .trim()
+      .toLowerCase()
+      // Strip ALL trailing [bot] suffixes so the normalizer is idempotent — the single-suffix
+      // `/\[bot\]$/` left a residual on a doubled "x[bot][bot]" that a second pass would strip.
+      .replace(/(\[bot\])+$/i, "")
+  );
 }
 
 export function isGitHubAppIntegrationAuthError(message: JsonValue) {
