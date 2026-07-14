@@ -155,10 +155,14 @@ process.stdout.write(fs.readFileSync(process.env.OPENCODE_OUTPUT_FIXTURE, "utf8"
     PATH: process.env.PATH,
     OPENCODE_OUTPUT_FIXTURE: process.env.OPENCODE_OUTPUT_FIXTURE,
     CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS,
+    CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL: process.env.CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL,
   };
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
   process.env.OPENCODE_OUTPUT_FIXTURE = outputFixture;
   process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS = "1";
+  // This test exercises the legacy structured-JSON path (repair + training samples);
+  // non-codex engines now default to the markdown-verdict path.
+  process.env.CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL = "1";
   try {
     const decision = runReviewWithEngineForTest({
       engine: "opencode",
@@ -233,11 +237,15 @@ process.stdout.write("I need to inspect the repository first. Let me check the d
     CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS,
     CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS:
       process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS,
+    CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL: process.env.CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL,
   };
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
   process.env.AGY_CALLS_PATH = callsPath;
   process.env.CLAWSWEEPER_ENGINE_REVIEW_ATTEMPTS = "3";
   delete process.env.CLAWSWEEPER_METERED_ENGINE_REVIEW_ATTEMPTS;
+  // Legacy structured-JSON path: this quota-exhaustion + no-retry behaviour is on the
+  // structured lane; non-codex engines otherwise default to the markdown-verdict path.
+  process.env.CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL = "1";
   try {
     assert.throws(
       () =>

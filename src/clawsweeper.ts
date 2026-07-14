@@ -2354,6 +2354,11 @@ function requireStringArray(value: unknown, path: string): string[] {
   return value.map((entry, index) => requireString(entry, `${path}[${index}]`));
 }
 
+function requireArray(value: unknown, path: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  return value;
+}
+
 function requireEnumArray<T extends string>(value: unknown, allowed: Set<T>, path: string): T[] {
   return requireStringArray(value, path).map((entry, index) =>
     requireEnum(entry, allowed, `${path}[${index}]`),
@@ -2729,9 +2734,10 @@ function parseMantisRecommendation(value: unknown, path: string): MantisRecommen
     reason: requireString(record.reason, `${path}.reason`),
     // Engines reasonably emit null/omit when there is no maintainer comment;
     // coerce to the empty string instead of failing the whole decision.
-    maintainerComment: record.maintainerComment == null
-      ? ""
-      : requireString(record.maintainerComment, `${path}.maintainerComment`),
+    maintainerComment:
+      record.maintainerComment == null
+        ? ""
+        : requireString(record.maintainerComment, `${path}.maintainerComment`),
   };
 }
 
@@ -16460,6 +16466,203 @@ function structuredReviewInstruction(schemaText: string, priorError?: string): s
   return `\n\n## Required output format (STRICT MACHINE CONTRACT)\nThis is not an interactive agent turn. Your stdout is parsed by a machine. Do not narrate progress, plans, tool use, repository exploration, or uncertainty. Do not write markdown. Do not use code fences. Do not emit any text before or after the object.\n\nRespond with ONLY one JSON object that validates against the JSON Schema below. The first character of your response must be "{" and the last must be "}". Include every required property with a valid value. If you cannot complete the review, still return a schema-valid conservative decision JSON with low confidence and explain the limitation inside schema fields.\n\nJSON Schema:\n${schemaText}${retry}`;
 }
 
+function markdownVerdictInstruction(priorError?: string): string {
+  const retry = priorError
+    ? `\n\nIMPORTANT: your previous attempt's JSON verdict block was missing/invalid: ${priorError}\nIt MUST end with a valid \`\`\`json block containing the exact keys below.`
+    : "";
+  return `\n\n## Review format\nWrite a concise markdown review for the PR diff and PR body. Focus on correctness bugs, risks, security gaps, and concrete fixes. Skip praise and high-level fluff.\n\nThen, as the LAST thing, append exactly one fenced JSON block:\n\n\`\`\`json\n{\n  "overall_tier": "S|A|B|C|D|F|NA",\n  "proof_tier": "S|A|B|C|D|F|NA",\n  "patch_tier": "S|A|B|C|D|F|NA",\n  "real_behavior_proof_status": "sufficient|missing|mock_only|insufficient|not_applicable|override",\n  "overall_correctness": "patch is correct|patch is incorrect|not a patch",\n  "security_status": "cleared|needs_attention|not_applicable",\n  "findings": [\n    {\n      "title": "string",\n      "body": "string",\n      "priority": 0|1|2|3,\n      "file": "string",\n      "line_start": number,\n      "line_end": number\n    }\n  ]\n}\n\`\`\`\n\nFor every real bug include one finding in the array; if none, use [] for findings.${retry}`;
+}
+
+function parseMarkdownVerdictOutput(
+  stdout: string,
+  engine: ReviewEngine,
+  item: Item,
+): { decision: Decision } {
+  const lastBlock = [...stdout.matchAll(/```json\s*\n([\s\S]*?)\n```/gi)].at(-1);
+  if (!lastBlock) {
+    throw new CodexReviewError({
+      message: `${engine} produced no JSON verdict block`,
+      status: null,
+      stdout,
+      retryable: false,
+    });
+  }
+  const reviewText = stdout.slice(0, lastBlock.index).trim();
+  if (!reviewText) {
+    throw new CodexReviewError({
+      message: `${engine} markdown review is empty`,
+      status: null,
+      stdout,
+      retryable: false,
+    });
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse((lastBlock[1] ?? "").trim());
+  } catch (error) {
+    throw new CodexReviewError({
+      message: `${engine} produced invalid JSON verdict block: ${error instanceof Error ? error.message : String(error)}`,
+      status: null,
+      stdout,
+      retryable: false,
+    });
+  }
+  const verdict = requireRecord(parsed, "markdownVerdictOutput");
+  const requiredKeys = [
+    "overall_tier",
+    "proof_tier",
+    "patch_tier",
+    "real_behavior_proof_status",
+    "overall_correctness",
+    "security_status",
+    "findings",
+  ] as const;
+  for (const key of requiredKeys) {
+    if (!Object.prototype.hasOwnProperty.call(verdict, key)) {
+      throw new CodexReviewError({
+        message: `${engine} verdict block missing required key: ${key}`,
+        status: null,
+        stdout,
+        retryable: false,
+      });
+    }
+  }
+
+  const overallTiers = new Set<PrRatingTier>(["S", "A", "B", "C", "D", "F", "NA"]);
+  const proofStatuses = new Set<RealBehaviorProofStatus>([
+    "sufficient",
+    "missing",
+    "mock_only",
+    "insufficient",
+    "not_applicable",
+    "override",
+  ]);
+  const overallCorrectnesses = new Set<OverallCorrectness>([
+    "patch is correct",
+    "patch is incorrect",
+    "not a patch",
+  ]);
+  const securityStatuses = new Set<SecurityReviewStatus>([
+    "cleared",
+    "needs_attention",
+    "not_applicable",
+  ]);
+  const needsContributorActionStatuses = new Set<RealBehaviorProofStatus>([
+    "missing",
+    "insufficient",
+    "mock_only",
+  ]);
+
+  const verdictResult = {
+    overall_tier: requireEnum(
+      verdict.overall_tier,
+      overallTiers,
+      "markdownVerdictOutput.overall_tier",
+    ),
+    proof_tier: requireEnum(verdict.proof_tier, overallTiers, "markdownVerdictOutput.proof_tier"),
+    patch_tier: requireEnum(verdict.patch_tier, overallTiers, "markdownVerdictOutput.patch_tier"),
+    real_behavior_proof_status: requireEnum(
+      verdict.real_behavior_proof_status,
+      proofStatuses,
+      "markdownVerdictOutput.real_behavior_proof_status",
+    ),
+    overall_correctness: requireEnum(
+      verdict.overall_correctness,
+      overallCorrectnesses,
+      "markdownVerdictOutput.overall_correctness",
+    ),
+    security_status: requireEnum(
+      verdict.security_status,
+      securityStatuses,
+      "markdownVerdictOutput.security_status",
+    ),
+    findings: requireArray(verdict.findings, "markdownVerdictOutput.findings"),
+  };
+
+  const findings = verdictResult.findings.map((rawFinding, index) => {
+    const record = requireRecord(rawFinding, `markdownVerdictOutput.findings[${index}]`);
+    const title = requireString(record.title, `markdownVerdictOutput.findings[${index}].title`);
+    const lineStart = requireInteger(
+      record.line_start,
+      `markdownVerdictOutput.findings[${index}].line_start`,
+    );
+    const lineEnd = requireInteger(
+      record.line_end,
+      `markdownVerdictOutput.findings[${index}].line_end`,
+    );
+    const priority = requirePriority(
+      record.priority,
+      `markdownVerdictOutput.findings[${index}].priority`,
+    );
+    return {
+      title: title.length > 80 ? title.slice(0, 80) : title,
+      body: requireString(record.body, `markdownVerdictOutput.findings[${index}].body`),
+      priority,
+      confidenceScore: 0.7,
+      file: requireString(record.file, `markdownVerdictOutput.findings[${index}].file`),
+      lineStart,
+      lineEnd,
+    };
+  });
+
+  // reviewText is already validated non-empty above, so trimMiddle keeps it non-empty.
+  const summary = trimMiddle(reviewText, 50000);
+
+  const needsContributorAction = needsContributorActionStatuses.has(
+    verdictResult.real_behavior_proof_status,
+  );
+  const decision = codexFailureDecision(
+    null,
+    `Markdown verdict review was parsed from ${engine} for ${item.repo}#${item.number}.`,
+  );
+  return {
+    decision: {
+      ...decision,
+      decision: "keep_open",
+      confidence: "low",
+      summary,
+      evidence: [
+        evidenceEntry({
+          label: `${engine} markdown review`,
+          detail: trimMiddle(reviewText, 8000),
+        }),
+      ],
+      changeSummary: `Markdown-verdict review from the \`${engine}\` local engine.`,
+      reviewFindings: findings,
+      securityReview: {
+        status: verdictResult.security_status,
+        summary: `Security status from markdown verdict: ${verdictResult.security_status}.`,
+        concerns: [],
+      },
+      realBehaviorProof: {
+        status: verdictResult.real_behavior_proof_status,
+        summary: `Real behavior proof status from markdown verdict: ${verdictResult.real_behavior_proof_status}.`,
+        evidenceKind: "not_applicable",
+        needsContributorAction,
+      },
+      prRating: {
+        proofTier: verdictResult.proof_tier,
+        patchTier: verdictResult.patch_tier,
+        overallTier: verdictResult.overall_tier,
+        summary: "PR rating from markdown verdict block.",
+        nextSteps: [],
+      },
+      overallCorrectness: verdictResult.overall_correctness,
+      codexTerminalFailure: false,
+      // The base decision is cloned from codexFailureDecision purely for its full field
+      // shape; the review actually SUCCEEDED, so neutralize the leftover failure prose in
+      // the non-gate fields to keep the rendered report coherent.
+      bestSolution: "See the markdown review in the summary.",
+      risks: [],
+      likelyOwners: [],
+      reproductionAssessment: "See the markdown review; not separately structured.",
+      solutionAssessment: "See the markdown review; not separately structured.",
+      workReason:
+        "Markdown-verdict advisory review — no structured work-lane recommendation extracted.",
+    },
+  };
+}
+
 function extractJsonObject(stdout: string): string {
   let text = stdout.trim();
   const fence = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/i);
@@ -16540,8 +16743,20 @@ function parseLocalModelDecisionOutput(stdout: string, item: Item): LocalModelDe
   throw new Error(lastError || firstParseError || "model output could not be parsed");
 }
 
+export function parseMarkdownVerdictOutputForTest(
+  stdout: string,
+  engine: ReviewEngine,
+  item: Item,
+): { decision: Decision } {
+  return parseMarkdownVerdictOutput(stdout, engine, item);
+}
+
 export function parseLocalModelDecisionOutputForTest(stdout: string, item: Item): Decision {
   return parseLocalModelDecisionOutput(stdout, item).decision;
+}
+
+export function markdownVerdictInstructionForTest(priorError?: string): string {
+  return markdownVerdictInstruction(priorError);
 }
 
 function localModelJsonCandidates(rawJson: string): LocalModelJsonCandidate[] {
@@ -16825,6 +17040,7 @@ function runReviewWithEngine(options: {
 }): Decision {
   ensureDir(options.workDir);
   const schemaText = reviewDecisionSchemaText();
+  const useMarkdownVerdict = process.env.CLAWSWEEPER_LEGACY_STRUCTURED_LOCAL !== "1";
   const maxAttempts = reviewEngineAttemptLimit(options.engine);
   const startedAt = Date.now();
   let priorError: string | undefined;
@@ -16837,7 +17053,11 @@ function runReviewWithEngine(options: {
         retryable: false,
       });
     }
-    const fullPrompt = options.basePrompt + structuredReviewInstruction(schemaText, priorError);
+    const fullPrompt =
+      options.basePrompt +
+      (useMarkdownVerdict
+        ? markdownVerdictInstruction(priorError)
+        : structuredReviewInstruction(schemaText, priorError));
     const { command, args, input } = engineSpawnSpec(
       options.engine,
       options.model,
@@ -16904,6 +17124,9 @@ function runReviewWithEngine(options: {
       continue;
     }
     try {
+      if (useMarkdownVerdict) {
+        return parseMarkdownVerdictOutput(stdout, options.engine, options.item).decision;
+      }
       const parsed = parseLocalModelDecisionOutput(stdout, options.item);
       if (
         parsed.repairSteps.length > 0 ||
@@ -17085,7 +17308,79 @@ export function buildLocalRangeReviewForTest(
   return buildLocalRangeReview(targetDir, repo, baseRef);
 }
 
+const REVIEW_COMMAND_FLAGS = new Set([
+  "local_range",
+  "local_only",
+  "verbose",
+  "item_number",
+  "item_numbers",
+  "target_dir",
+  "openclaw_dir",
+  "artifact_dir",
+  "base",
+  "items_dir",
+  "batch_size",
+  "max_pages",
+  "codex_model",
+  "codex_reasoning_effort",
+  "codex_sandbox",
+  "codex_service_tier",
+  "engine",
+  "additional_prompt",
+  "additional_policy",
+  "allow_closed",
+  "body_file",
+  "target_repo",
+  "shard_index",
+  "shard_count",
+  "hot_intake",
+  "readonly_openclaw",
+  "skip_start_comment",
+  "codex_timeout_ms",
+  "engine_model",
+  "codex_forced_login_method",
+  "help",
+  "h",
+]);
+
+function reviewCommandUsageText(): string {
+  return [
+    "Usage: clawsweeper review [options]",
+    "",
+    "Review one or more OpenClaw items and write proposal-only review reports.",
+    "",
+    "Options:",
+    "  --help, -h              Print this help text and exit.",
+    "  --target-repo <owner/name>  Review a different repository profile.",
+    "  --local-only            Run review without GitHub writes.",
+    "  --local-range           Review the local HEAD commit range.",
+    "  --item-number <n>       Review one exact item number.",
+    "  --item-numbers <n,n,..> Review comma-separated item numbers.",
+    "  --engine <name>         Select local review engine for this run.",
+    "  --artifact-dir <path>   Set artifact output directory.",
+  ].join("\n");
+}
+
+function validateReviewArgs(args: Args): void {
+  const unknownFlags = Object.keys(args).filter(
+    (key) => key !== "_" && !REVIEW_COMMAND_FLAGS.has(key),
+  );
+  if (unknownFlags.length > 0) {
+    throw new Error(`Unknown review flags: ${unknownFlags.join(", ")}`);
+  }
+  const extraPositional = args._.slice(1).filter((value) => value !== "-h" && value !== "--help");
+  if (extraPositional.length > 0) {
+    throw new Error(`Unknown review arguments: ${extraPositional.join(", ")}`);
+  }
+}
+
 function reviewCommand(args: Args): void {
+  // parseArgs puts single-dash `-h` into args._ (not args.h); handle every form.
+  if (boolArg(args.help) || boolArg(args.h) || args._.includes("-h")) {
+    console.log(reviewCommandUsageText());
+    return;
+  }
+  validateReviewArgs(args);
   const profile = repoFromArgs(args);
   // `--local-range` is inherently a local, offline operation, so it implies `--local-only`
   // (no GitHub writes, and the local Codex auth / Windows-launcher path in runCodex below).
