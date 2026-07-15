@@ -19,7 +19,12 @@ import {
 import { publishCheckFromReport, splitFrontMatter } from "./commit-checks.js";
 import { argBool, argNumber, argString, parseArgs, type Args } from "./clawsweeper-args.js";
 import { safeOutputTail } from "./clawsweeper-text.js";
-import { codexEnv, codexLoginConfig, codexModelArgs, PUBLIC_CODEX_MODEL } from "./codex-env.js";
+import {
+  codexLoginConfig,
+  codexModelArgs,
+  PUBLIC_CODEX_MODEL,
+  reviewEngineEnv,
+} from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
 import { runText } from "./command.js";
 import { ghRetryKind, ghRetryWaitMs } from "./github-retry.js";
@@ -378,7 +383,7 @@ function runCodex(options: {
       "-",
     ],
     cwd: options.targetDir,
-    env: codexEnv({ ghToken: process.env.COMMIT_SWEEPER_TARGET_GH_TOKEN }),
+    env: reviewEngineEnv({ ghToken: process.env.COMMIT_SWEEPER_TARGET_GH_TOKEN }),
     input: readFileSync(promptPath, "utf8"),
     timeoutMs: options.timeoutMs,
   });
@@ -454,7 +459,7 @@ Return only the Markdown report. Start the response with \`---\`; do not add a p
 
 // Local-review Claude engine: drives a FIXED `claude` CLI through the same bounded
 // runner as codex (no operator-configurable binary), credentials scrubbed via
-// codexEnv, read-only tools. Auth is the caller's existing Claude auth — for a
+// reviewEngineEnv, read-only tools. Auth is the caller's existing Claude auth — for a
 // subscription set CLAUDE_CODE_OAUTH_TOKEN (and leave ANTHROPIC_API_KEY unset).
 function runClaudeReview(options: {
   targetDir: string;
@@ -492,7 +497,7 @@ function runClaudeReview(options: {
     command: "claude",
     args: ["-p", "--output-format", "text", "--allowedTools", "Read,Grep,Glob"],
     cwd: options.targetDir,
-    env: codexEnv(),
+    env: reviewEngineEnv(),
     input: prompt.prompt,
     timeoutMs: options.timeoutMs,
     stdoutPath,
@@ -584,7 +589,7 @@ function runAgyReview(options: {
       prompt.prompt,
     ],
     cwd: options.targetDir,
-    env: codexEnv(),
+    env: reviewEngineEnv(),
     input: "",
     timeoutMs: options.timeoutMs,
     stdoutPath,
@@ -661,7 +666,7 @@ function runCursorReview(options: {
     command: "agent",
     args: ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--model", options.model],
     cwd: options.targetDir,
-    env: codexEnv(),
+    env: reviewEngineEnv(),
     input: prompt.prompt,
     timeoutMs: options.timeoutMs,
     stdoutPath,
@@ -767,7 +772,7 @@ function runOpencodeReview(options: {
       prompt.prompt,
     ],
     cwd: options.targetDir,
-    env: codexEnv(),
+    env: reviewEngineEnv(),
     input: "",
     timeoutMs: options.timeoutMs,
     stdoutPath,
