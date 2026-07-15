@@ -8,11 +8,18 @@
       "community_url": "https://clawhub.ai/",
       "prompt_note": "Use the ClawHub source tree and current main branch. Review every issue and PR with the same evidence standard. Propose auto-close for issues and pull requests that are certainly implemented on main; for pull requests only, also allow age-gated mostly implemented on main. Keep everything else open.",
       "apply_close_rules": {
-        "issue": ["implemented_on_main"],
-        "pull_request": ["implemented_on_main", "mostly_implemented_on_main"]
+        "issue": [
+          "implemented_on_main"
+        ],
+        "pull_request": [
+          "implemented_on_main",
+          "mostly_implemented_on_main"
+        ]
       },
       "package_manager": "bun",
-      "validation_commands": ["bun run check"],
+      "validation_commands": [
+        "bun run check"
+      ],
       "changed_gate": null
     },
     {
@@ -21,8 +28,13 @@
       "checkout_dir": "clawsweeper",
       "prompt_note": "Use the ClawSweeper source tree and current main branch. Review bot automation, workflow, and documentation changes conservatively. Propose auto-close for issues and pull requests that are certainly implemented on main; for pull requests only, also allow age-gated mostly implemented on main. Keep everything else open for maintainer triage.",
       "apply_close_rules": {
-        "issue": ["implemented_on_main"],
-        "pull_request": ["implemented_on_main", "mostly_implemented_on_main"]
+        "issue": [
+          "implemented_on_main"
+        ],
+        "pull_request": [
+          "implemented_on_main",
+          "mostly_implemented_on_main"
+        ]
       },
       "package_manager": "pnpm",
       "validation_commands": [],
@@ -37,8 +49,13 @@
       "checkout_dir": "fs-safe",
       "prompt_note": "Use the fs-safe source tree and current main branch. Review filesystem-safety, path-handling, and package changes conservatively. Propose auto-close for issues and pull requests that are certainly implemented on main; for pull requests only, also allow age-gated mostly implemented on main. Keep everything else open for maintainer triage.",
       "apply_close_rules": {
-        "issue": ["implemented_on_main"],
-        "pull_request": ["implemented_on_main", "mostly_implemented_on_main"]
+        "issue": [
+          "implemented_on_main"
+        ],
+        "pull_request": [
+          "implemented_on_main",
+          "mostly_implemented_on_main"
+        ]
       },
       "package_manager": "pnpm",
       "validation_commands": [],
@@ -48,7 +65,7 @@
       "target_repo": "pytorch/pytorch",
       "display_name": "PyTorch",
       "checkout_dir": "pytorch",
-      "prompt_note": "External repo — LOCAL review only via `local-review --engine claude`. Never auto-close or comment. Apply the repo checkout's own AGENTS.md->CLAUDE.md->.claude/skills as the PyTorch MPS review contract. Substitutes for the absent @clawsweeper bot.",
+      "prompt_note": "External repo \u2014 LOCAL review only via `local-review --engine claude`. Never auto-close or comment. Apply the repo checkout's own AGENTS.md->CLAUDE.md->.claude/skills as the PyTorch MPS review contract. Substitutes for the absent @clawsweeper bot.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
@@ -61,13 +78,15 @@
       "target_repo": "anomalyco/opencode",
       "display_name": "OpenCode",
       "checkout_dir": "opencode",
-      "prompt_note": "External repo — LOCAL review only via `local-review --engine Codex`. Never auto-close or comment. Apply the repo checkout's own CONTRIBUTING.md + AGENTS.md + PR template + workflows as the review contract. Substitutes for the absent @clawsweeper bot.",
+      "prompt_note": "External repo \u2014 LOCAL review only via `local-review --engine Codex`. Never auto-close or comment. Apply the repo checkout's own CONTRIBUTING.md + AGENTS.md + PR template + workflows as the review contract. Substitutes for the absent @clawsweeper bot.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
       },
       "package_manager": "bun",
-      "validation_commands": ["bun turbo test"],
+      "validation_commands": [
+        "bun turbo test"
+      ],
       "changed_gate": null
     },
     {
@@ -87,7 +106,7 @@
       "target_repo": "anagnorisis2peripeteia/agent-skills",
       "display_name": "Agent Skills",
       "checkout_dir": "agent-skills",
-      "prompt_note": "Personal skill and plugin repository — LOCAL review only. Apply the checkout README and review lifecycle changes conservatively. For Issue Loop, enforce fail-closed publication, sanitized persistence, duplicate-aware reporting, stable runtime convergence, and transactional watcher rollback. Never auto-close or comment from local review.",
+      "prompt_note": "Personal skill and plugin repository \u2014 LOCAL review only. Apply the checkout README and review lifecycle changes conservatively. For Issue Loop, enforce fail-closed publication, sanitized persistence, duplicate-aware reporting, stable runtime convergence, and transactional watcher rollback. Never auto-close or comment from local review.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
@@ -95,17 +114,38 @@
       "package_manager": null,
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "target_repo": "anagnorisis2peripeteia/einsiedlerkrebs",
+      "display_name": "Einsiedlerkrebs",
+      "checkout_dir": "einsiedlerkrebs",
+      "prompt_note": "Our own diff-scoped, fail-closed property/invariant testing PR-gate CLI (marmorkrebs sibling; fast-check lane, JS/.mjs). Review fail-closed semantics hard: a tool failure, empty run, or QUARANTINED engine must never read as a pass, and property/invariant modules must be authored per behavior-changing PR, not assumed present.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "npm",
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "generic_fallbacks": [
     {
       "owner": "openclaw",
-      "deny_repositories": ["openclaw/clawsweeper-state", "openclaw/.github"],
+      "deny_repositories": [
+        "openclaw/clawsweeper-state",
+        "openclaw/.github"
+      ],
       "allow_repo_name_pattern": "^[A-Za-z0-9_.-]+$",
       "prompt_note": "Use the {target_repo} source tree and current default branch. This repository is using the generic OpenClaw onboarding profile, so keep review conservative: issues and pull requests may be auto-closed only when the exact change is certainly already implemented on the default branch; pull requests may also be age-gated mostly implemented there.",
       "apply_close_rules": {
-        "issue": ["implemented_on_main"],
-        "pull_request": ["implemented_on_main", "mostly_implemented_on_main"]
+        "issue": [
+          "implemented_on_main"
+        ],
+        "pull_request": [
+          "implemented_on_main",
+          "mostly_implemented_on_main"
+        ]
       },
       "package_manager": "pnpm",
       "validation_commands": [],
@@ -149,8 +189,14 @@
     }
   },
   "target_inventory": {
-    "owners": ["openclaw", "steipete"],
-    "deny_repositories": ["openclaw/clawsweeper-state", "openclaw/.github"],
+    "owners": [
+      "openclaw",
+      "steipete"
+    ],
+    "deny_repositories": [
+      "openclaw/clawsweeper-state",
+      "openclaw/.github"
+    ],
     "include_private": false,
     "include_archived": false,
     "include_forks": false,
