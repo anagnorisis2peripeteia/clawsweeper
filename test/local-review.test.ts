@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,11 +37,15 @@ function initRepo(): string {
   return dir;
 }
 
-function runLocalReview(dir: string, args: string[]): { status: number | null; out: string } {
+function runLocalReview(
+  dir: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): { status: number | null; out: string } {
   const result = spawnSync(process.execPath, [CLI, "local-review", "--target-dir", dir, ...args], {
     cwd: dir,
     encoding: "utf8",
-    env: { ...process.env },
+    env: { ...env },
   });
   return { status: result.status, out: `${result.stderr ?? ""}${result.stdout ?? ""}` };
 }
@@ -216,4 +220,143 @@ test("local-review disables web search and forbids network lookups in its prompt
   assert.match(prompt, /do not .*web search/i);
   assert.match(prompt, /do not .*network request/i);
   assert.match(prompt, /only the local checkout and git history/i);
+});
+
+test("local-review marks direct Codex review subprocesses to suppress Issue Loop hooks", () => {
+  const dir = initRepo();
+  const fakeBin = mkdtempSync(join(tmpdir(), "lr-bin-"));
+  const reportDir = mkdtempSync(join(tmpdir(), "lr-report-"));
+  const markerPath = join(reportDir, "issue-loop-marker.txt");
+  try {
+    const base = git(dir, "rev-parse", "HEAD");
+    writeFileSync(join(dir, "b.txt"), "2\n");
+    git(dir, "add", "b.txt");
+    git(dir, "commit", "-q", "-m", "second");
+    const head = git(dir, "rev-parse", "HEAD");
+    const fakeCodex = join(fakeBin, "codex");
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+
+const outputFlag = process.argv.indexOf("--output-last-message");
+const outputPath = process.argv[outputFlag + 1];
+process.stdin.resume();
+process.stdin.on("end", () => {
+  writeFileSync(process.env.REVIEW_MARKER_PATH, process.env.ISSUE_LOOP_ACTIVE ?? "unset");
+  writeFileSync(outputPath, \`---\nsha: \${process.env.REVIEW_HEAD_SHA}\nresult: nothing_found\nsummary: Review completed\nconfidence: high\n---\n\n# Commit \${process.env.REVIEW_HEAD_SHA.slice(0, 12)}\n\nNo findings.\n\`);
+});
+`,
+    );
+    chmodSync(fakeCodex, 0o755);
+
+    const { status, out } = runLocalReview(
+      dir,
+      [
+        "--target-repo",
+        "openclaw/clawsweeper",
+        "--base",
+        base,
+        "--engine",
+        "codex",
+        "--report-dir",
+        reportDir,
+      ],
+      {
+        ...process.env,
+        ISSUE_LOOP_ACTIVE: "0",
+        PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+        REVIEW_HEAD_SHA: head,
+        REVIEW_MARKER_PATH: markerPath,
+      },
+    );
+
+    assert.equal(status, 0, out);
+    assert.equal(readFileSync(markerPath, "utf8"), "1");
+    assert.match(out, /local-review\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(reportDir, { recursive: true, force: true });
+  }
+});
+
+test("online Codex review subprocesses keep their explicit token with Issue Loop hooks suppressed", () => {
+  const dir = initRepo();
+  const fakeBin = mkdtempSync(join(tmpdir(), "review-bin-"));
+  const reportDir = mkdtempSync(join(tmpdir(), "review-report-"));
+  const markerPath = join(reportDir, "review-env.json");
+  try {
+    const base = git(dir, "rev-parse", "HEAD");
+    writeFileSync(join(dir, "b.txt"), "2\n");
+    git(dir, "add", "b.txt");
+    git(dir, "commit", "-q", "-m", "second");
+    const head = git(dir, "rev-parse", "HEAD");
+    const fakeCodex = join(fakeBin, "codex");
+    const fakeGh = join(fakeBin, "gh");
+    writeFileSync(
+      fakeCodex,
+      `#!/usr/bin/env node
+import { writeFileSync } from "node:fs";
+
+const outputFlag = process.argv.indexOf("--output-last-message");
+const outputPath = process.argv[outputFlag + 1];
+process.stdin.resume();
+process.stdin.on("end", () => {
+  writeFileSync(process.env.REVIEW_MARKER_PATH, JSON.stringify({
+    issueLoop: process.env.ISSUE_LOOP_ACTIVE,
+    ghToken: process.env.GH_TOKEN,
+  }));
+  writeFileSync(outputPath, \`---\nsha: \${process.env.REVIEW_HEAD_SHA}\nresult: nothing_found\nsummary: Review completed\nconfidence: high\n---\n\n# Commit \${process.env.REVIEW_HEAD_SHA.slice(0, 12)}\n\nNo findings.\n\`);
+});
+`,
+    );
+    writeFileSync(fakeGh, "#!/usr/bin/env node\n");
+    chmodSync(fakeCodex, 0o755);
+    chmodSync(fakeGh, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "review",
+        "--target-dir",
+        dir,
+        "--target-repo",
+        "openclaw/clawsweeper",
+        "--commit-sha",
+        head,
+        "--base-sha",
+        base,
+        "--artifact-mode",
+        "--report-dir",
+        reportDir,
+        "--work-dir",
+        join(reportDir, "work"),
+      ],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          COMMIT_SWEEPER_TARGET_GH_TOKEN: "review-target-token",
+          ISSUE_LOOP_ACTIVE: "0",
+          PATH: `${fakeBin}:${process.env.PATH ?? ""}`,
+          REVIEW_HEAD_SHA: head,
+          REVIEW_MARKER_PATH: markerPath,
+        },
+      },
+    );
+    const out = `${result.stderr ?? ""}${result.stdout ?? ""}`;
+
+    assert.equal(result.status, 0, out);
+    assert.deepEqual(JSON.parse(readFileSync(markerPath, "utf8")), {
+      issueLoop: "1",
+      ghToken: "review-target-token",
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(fakeBin, { recursive: true, force: true });
+    rmSync(reportDir, { recursive: true, force: true });
+  }
 });

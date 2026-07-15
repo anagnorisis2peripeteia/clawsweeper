@@ -30,6 +30,7 @@ import {
   codexModelArgs,
   PUBLIC_CODEX_MODEL,
   redactInternalCodexModel,
+  reviewEngineEnv,
 } from "./codex-env.js";
 import { codexProcessErrorCode, runCodexProcess } from "./codex-process.js";
 import {
@@ -98,6 +99,7 @@ export {
   codexLoginConfig,
   codexLoginMethod,
   redactInternalCodexModel,
+  reviewEngineEnv,
 } from "./codex-env.js";
 export { parseGhJson, parseGhJsonLines } from "./github-json.js";
 export { itemNumbersArg } from "./clawsweeper-args.js";
@@ -7574,7 +7576,7 @@ function runCodex(options: {
         ],
         cwd: options.openclawDir,
         env: {
-          ...codexEnv({
+          ...reviewEngineEnv({
             ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
             preserveCodexAuth: options.preserveCodexAuth,
           }),
@@ -17074,7 +17076,7 @@ function runReviewWithEngine(options: {
       options.workDir,
       `${options.item.number}.${attempt}.${options.engine}.stderr.log`,
     );
-    const engineEnv = codexEnv();
+    const engineEnv = reviewEngineEnv();
     if (options.engine === "opencode") {
       const opencodeDataHome = join(options.workDir, "opencode-xdg-data");
       const opencodeStateHome = join(options.workDir, "opencode-xdg-state");

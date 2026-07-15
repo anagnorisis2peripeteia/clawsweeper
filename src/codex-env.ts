@@ -87,3 +87,12 @@ export function codexEnv(options: CodexEnvOptions = {}): NodeJS.ProcessEnv {
   env.GIT_OPTIONAL_LOCKS = "0";
   return env;
 }
+
+export function reviewEngineEnv(options: CodexEnvOptions = {}): NodeJS.ProcessEnv {
+  return {
+    ...codexEnv(options),
+    // Review-engine failures belong to ClawSweeper's bounded cascade result. Do not
+    // let a locally installed Issue Loop start a second triage workflow inside it.
+    ISSUE_LOOP_ACTIVE: "1",
+  };
+}
