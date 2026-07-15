@@ -12,6 +12,10 @@ test("compactText never exceeds maxLength, even for tiny caps", () => {
   }
   // Regression: maxLength 2 used to return the bare "..." (length 3).
   assert.equal(compactText("hello world", 2), "he");
+  assert.equal(compactText("abcdefghijklmnopqrstuvwxyz", 3), "...");
+  assert.equal(compactText("abcdefghijklmnopqrstuvwxyz", 4), "a...");
+  assert.equal(compactText("abcdefghijklmnopqrstuvwxyz", 16), "abcdefghijklm...");
+  assert.equal(compactText("abcdefghijklmnopqrstuvwxyz", 17), "abcdef ... uvwxyz");
 });
 
 test("slug is idempotent (a trailing dash is not re-introduced by the length slice)", () => {
@@ -34,4 +38,5 @@ test("slug is idempotent (a trailing dash is not re-introduced by the length sli
   }
   // Unregressed: normal slugs are unchanged.
   assert.equal(slug("my-repo-name"), "my-repo-name");
+  assert.equal(slug("a---b", "x", 3), "a");
 });

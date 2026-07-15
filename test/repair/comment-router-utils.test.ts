@@ -1449,6 +1449,10 @@ test("normalizeGitHubActor is idempotent for repeated [bot] suffixes", () => {
   assert.equal(normalizeGitHubActor(once), once);
   // Unregressed: a single real bot suffix still strips exactly once.
   assert.equal(normalizeGitHubActor("foo[bot]"), "foo");
+  assert.equal(normalizeGitHubActor("  Foo[bot]  "), "foo");
+  assert.equal(normalizeGitHubActor("x[bot][bot]tail"), "x[bot][bot]tail");
+  assert.equal(normalizeGitHubActor(null), "");
+  assert.equal(normalizeGitHubActor(123), "123");
 });
 
 test("mutation actor guard recognizes GitHub App integration auth shape", () => {
