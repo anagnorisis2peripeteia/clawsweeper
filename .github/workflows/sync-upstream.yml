@@ -1,0 +1,38 @@
+name: Sync main with upstream
+# The ONLY intended CI on this repo (Cameron, 2026-07-15): keep main an exact
+# mirror of openclaw/clawsweeper main. Everything else is disabled — the
+# upstream automation workflows cannot run here (no upstream app key) and only
+# produced failure noise. Canonical local work lives on cli-engines; main
+# carries no local commits, so a force mirror is the correct semantics and any
+# stray commit on main is deliberately wiped.
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Force-mirror main from openclaw/clawsweeper
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init -q sync
+          cd sync
+          git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
+          git remote add upstream "https://github.com/openclaw/clawsweeper.git"
+          git fetch -q --filter=blob:none upstream main
+          upstream_sha="$(git rev-parse FETCH_HEAD)"
+          current_sha="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$upstream_sha" = "$current_sha" ]; then
+            echo "main already at upstream $upstream_sha"
+            exit 0
+          fi
+          echo "mirroring main: $current_sha -> $upstream_sha"
+          git push -q --force origin "$upstream_sha:refs/heads/main"
