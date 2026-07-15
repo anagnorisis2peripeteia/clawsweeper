@@ -5,6 +5,12 @@ name: Sync main with upstream
 # produced failure noise. Canonical local work lives on cli-engines; main
 # carries no local commits, so a force mirror is the correct semantics and any
 # stray commit on main is deliberately wiped.
+#
+# NOTE: github.token cannot push .github/workflows/* changes (GitHub hard
+# restriction, no grantable workflows:write for workflow tokens), and upstream
+# regularly touches its workflows. Set a fine-grained PAT with contents+
+# workflows write on THIS repo as the SYNC_TOKEN secret; without it the run
+# fails whenever upstream changed a workflow file.
 on:
   schedule:
     - cron: "17 */6 * * *"
@@ -20,7 +26,7 @@ jobs:
     steps:
       - name: Force-mirror main from openclaw/clawsweeper
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SYNC_TOKEN || github.token }}
         run: |
           set -euo pipefail
           git init -q sync
