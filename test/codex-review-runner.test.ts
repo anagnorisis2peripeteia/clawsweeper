@@ -670,18 +670,22 @@ const fs = require("node:fs");
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const attempt = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
 fs.writeFileSync(attemptsPath, String(attempt));
-if (attempt === 1) {
-  process.stderr.write("user\\nERROR: The model contributor-quoted-model does not exist or you do not have access to it.\\n");
-  process.stdout.write(JSON.stringify({
-    type: "turn.failed",
-    error: {
-      message: "stream disconnected: Rate limit reached for secret-model-for-test (for limit test) on tokens per min (TPM). Please try again in 1ms."
-    }
-  }) + "\\n");
-  process.exit(1);
-}
-const outputIndex = process.argv.indexOf("--output-last-message");
-fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+process.stdin.resume();
+process.stdin.on("end", () => {
+  if (attempt === 1) {
+    process.stderr.write("user\\nERROR: The model contributor-quoted-model does not exist or you do not have access to it.\\n");
+    process.stdout.write(JSON.stringify({
+      type: "turn.failed",
+      error: {
+        message: "stream disconnected: Rate limit reached for secret-model-for-test (for limit test) on tokens per min (TPM). Please try again in 1ms."
+      }
+    }) + "\\n");
+    process.exitCode = 1;
+    return;
+  }
+  const outputIndex = process.argv.indexOf("--output-last-message");
+  fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON);
+});
 `,
   );
   chmodSync(codexPath, 0o755);
