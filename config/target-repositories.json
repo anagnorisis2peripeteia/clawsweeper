@@ -127,6 +127,19 @@
       "package_manager": "npm",
       "validation_commands": [],
       "changed_gate": null
+    },
+    {
+      "target_repo": "anagnorisis2peripeteia/marmorkrebs",
+      "display_name": "Marmorkrebs",
+      "checkout_dir": "marmorkrebs",
+      "prompt_note": "Our own PR-scoped multi-language mutation orchestrator (TS/node CLI dispatching stryker/mutmut/cargo-mutants/gomu/stryker-net/stryker-cxx). Review fail-open hardest: any path where a tool failure, missing binary, kill signal, zero-mutant run, or unparseable report reads as a passing/score-1.0 result is a P1; reconcileResult is the net and changes must not route around it. Adapter or parser edits are invalid without live real-tool evidence (validate-provider lane PASS). Enforce node 20/22 x ubuntu/macos/windows portability: no shell-glob or quoting assumptions, no exit-code-through-pipe, platform-agnostic paths in tests.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "npm",
+      "validation_commands": [],
+      "changed_gate": null
     }
   ],
   "generic_fallbacks": [
