@@ -1435,6 +1435,7 @@ test("mutation actor guard accepts only trusted bot identities", () => {
   assert.equal(normalizeGitHubActor("ClawSweeper[bot]"), "clawsweeper");
   assert.equal(isAllowedMutationActor("ClawSweeper[bot]", trustedBots), true);
   assert.equal(isAllowedMutationActor("clawsweeper[bot]", trustedBots), true);
+  assert.equal(isAllowedMutationActor("clawsweeper[bot][bot]", trustedBots), false);
   assert.equal(isAllowedMutationActor("clawsweeper", trustedBots), false);
   assert.equal(isAllowedMutationActor("openclaw-clawsweeper[bot]", trustedBots), true);
   assert.equal(isAllowedMutationActor("steipete", trustedBots), false);
