@@ -825,6 +825,7 @@ interface ReviewPromptBuild {
 }
 
 interface PreparedMediaProofArtifact {
+  kind: "image" | "video";
   url: string;
   downloadedPath: string | null;
   metadataPath: string | null;
@@ -8824,7 +8825,9 @@ type MediaProofCommandRunner = (
   error?: Error;
 };
 
+const IMAGE_PROOF_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 const VIDEO_PROOF_EXTENSIONS = new Set([".mov", ".mp4", ".m4v", ".webm", ".avi", ".mkv"]);
+const MEDIA_PROOF_EXTENSIONS = new Set([...IMAGE_PROOF_EXTENSIONS, ...VIDEO_PROOF_EXTENSIONS]);
 const MEDIA_PROOF_MANIFEST_FILE = "media-proof-manifest.json";
 const MEDIA_PROOF_SUMMARY_FILE = "media-proof-summary.md";
 const MAX_MEDIA_PROOF_URLS = 4;
@@ -8843,7 +8846,7 @@ function trimTrailingUrlPunctuation(raw: string): string {
   return raw.slice(0, end);
 }
 
-function proofVideoUrlsFromContext(context: ItemContext): string[] {
+function proofMediaUrlsFromContext(context: ItemContext): string[] {
   const { semanticPullFiles: _, pullCommitsRevision: __, ...proofContext } = context;
   const text = JSON.stringify(proofContext);
   const matches = text.match(/https?:\/\/[^\s<>"'\\)]+/g) ?? [];
@@ -8858,8 +8861,8 @@ function proofVideoUrlsFromContext(context: ItemContext): string[] {
       continue;
     }
     const pathname = parsed.pathname.toLowerCase();
-    const isVideo = [...VIDEO_PROOF_EXTENSIONS].some((extension) => pathname.endsWith(extension));
-    if (!isVideo || seen.has(parsed.href)) continue;
+    const isMedia = [...MEDIA_PROOF_EXTENSIONS].some((extension) => pathname.endsWith(extension));
+    if (!isMedia || seen.has(parsed.href)) continue;
     seen.add(parsed.href);
     urls.push(parsed.href);
     if (urls.length >= MAX_MEDIA_PROOF_URLS) break;
@@ -8870,11 +8873,16 @@ function proofVideoUrlsFromContext(context: ItemContext): string[] {
 function mediaProofFileExtension(url: string): string {
   try {
     const pathname = new URL(url).pathname.toLowerCase();
-    const extension = [...VIDEO_PROOF_EXTENSIONS].find((candidate) => pathname.endsWith(candidate));
-    return extension ?? ".video";
+    const extension = [...MEDIA_PROOF_EXTENSIONS].find((candidate) => pathname.endsWith(candidate));
+    return extension ?? ".media";
   } catch {
-    return ".video";
+    return ".media";
   }
+}
+
+function mediaProofKind(url: string): "image" | "video" {
+  const extension = mediaProofFileExtension(url);
+  return IMAGE_PROOF_EXTENSIONS.has(extension) ? "image" : "video";
 }
 
 function mediaProofSpawnDetail(result: ReturnType<MediaProofCommandRunner>): string {
@@ -8891,15 +8899,16 @@ function prepareMediaProofArtifacts(
   proofScratchDir: string,
   runner: MediaProofCommandRunner = mediaProofCommandRunner,
 ): PreparedMediaProof {
-  const urls = proofVideoUrlsFromContext(context);
+  const urls = proofMediaUrlsFromContext(context);
   if (urls.length === 0) return { manifestPath: null, summaryPath: null, artifacts: [] };
   ensureDir(proofScratchDir);
   const artifacts: PreparedMediaProofArtifact[] = [];
   for (const [index, url] of urls.entries()) {
     const ordinal = index + 1;
+    const kind = mediaProofKind(url);
     const downloadedPath = join(
       proofScratchDir,
-      `proof-video-${ordinal}${mediaProofFileExtension(url)}`,
+      `proof-${kind}-${ordinal}${mediaProofFileExtension(url)}`,
     );
     const metadataPath = join(proofScratchDir, `proof-video-${ordinal}.ffprobe.json`);
     const contactSheetPath = join(proofScratchDir, `proof-video-${ordinal}.contact-sheet.jpg`);
@@ -8916,12 +8925,25 @@ function prepareMediaProofArtifacts(
     ]);
     if (download.status !== 0) {
       artifacts.push({
+        kind,
         url,
         downloadedPath: null,
         metadataPath: null,
         contactSheetPath: null,
         status: "failed",
         detail: `download failed: ${mediaProofSpawnDetail(download)}`,
+      });
+      continue;
+    }
+    if (kind === "image") {
+      artifacts.push({
+        kind,
+        url,
+        downloadedPath,
+        metadataPath: null,
+        contactSheetPath: null,
+        status: "prepared",
+        detail: "downloaded image proof for local inspection",
       });
       continue;
     }
@@ -8936,6 +8958,7 @@ function prepareMediaProofArtifacts(
     ]);
     if (metadata.status !== 0) {
       artifacts.push({
+        kind,
         url,
         downloadedPath,
         metadataPath: null,
@@ -8959,6 +8982,7 @@ function prepareMediaProofArtifacts(
     ]);
     if (contactSheet.status !== 0) {
       artifacts.push({
+        kind,
         url,
         downloadedPath,
         metadataPath,
@@ -8969,6 +8993,7 @@ function prepareMediaProofArtifacts(
       continue;
     }
     artifacts.push({
+      kind,
       url,
       downloadedPath,
       metadataPath,
@@ -9001,9 +9026,9 @@ function mediaProofRuntimePrompt(summary: string | undefined, manifestPath: stri
   const trimmed = summary?.trim();
   if (!trimmed || !manifestPath) return "";
   return `
-- ClawSweeper preprocessed linked video proof with ffprobe/ffmpeg before this review. Read \`${manifestPath}\` and inspect any generated contact-sheet image paths before trying browser playback.
-- If browser playback fails but ffprobe metadata and ffmpeg contact sheets are readable, assess the proof from those generated artifacts instead of treating the video as uninspectable.
-- Only fall back to browser playback after checking the prepared ffmpeg artifacts. If both ffmpeg extraction and browser playback fail, report the exact failure from the manifest.
+- ClawSweeper downloaded linked image and video proof before this review. Read \`${manifestPath}\` and inspect downloaded image paths and generated video contact-sheet paths locally before trying browser playback.
+- Assess screenshots directly from their downloaded image paths. If browser video playback fails but ffprobe metadata and ffmpeg contact sheets are readable, assess the video from those generated artifacts instead of treating it as uninspectable.
+- Only fall back to browser playback after checking the prepared local artifacts. If local preparation and browser playback both fail, report the exact failure from the manifest.
 `;
 }
 
@@ -9020,8 +9045,12 @@ function mediaProofRuntimeHints(
   return hints;
 }
 
+export function proofMediaUrlsFromContextForTest(context: ItemContext): string[] {
+  return proofMediaUrlsFromContext(context);
+}
+
 export function proofVideoUrlsFromContextForTest(context: ItemContext): string[] {
-  return proofVideoUrlsFromContext(context);
+  return proofMediaUrlsFromContext(context).filter((url) => mediaProofKind(url) === "video");
 }
 
 export function prepareMediaProofArtifactsForTest(
@@ -22380,9 +22409,9 @@ function reviewCommand(args: Args): void {
       const codexWorkDir = join(artifactDir, "codex");
       const proofScratchDir = join(codexWorkDir, "proof-scratch", String(item.number));
       // --local-range is a pre-PR LOCAL code review — it has no telegram-visible-proof to
-      // capture, and prepareMediaProofArtifacts would host-side `curl` + `ffmpeg` any media URL
-      // in the synthetic body (commit message / --body-file). Skip it entirely for local-range:
-      // no host download, no transcode of body-supplied URLs.
+      // capture, and prepareMediaProofArtifacts would host-side download media URLs and transcode
+      // videos in the synthetic body (commit message / --body-file). Skip it entirely for
+      // local-range: no host download or transcode of body-supplied URLs.
       const preparedMediaProof: PreparedMediaProof = localRangeData
         ? { manifestPath: null, summaryPath: null, artifacts: [] }
         : prepareMediaProofArtifacts(context, proofScratchDir);
