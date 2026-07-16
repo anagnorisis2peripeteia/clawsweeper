@@ -94,5 +94,12 @@ export function reviewEngineEnv(options: CodexEnvOptions = {}): NodeJS.ProcessEn
     // Review-engine failures belong to ClawSweeper's bounded cascade result. Do not
     // let a locally installed Issue Loop start a second triage workflow inside it.
     ISSUE_LOOP_ACTIVE: "1",
+    // Recursion isolation for the delegation-router guard (agent-skills #85, sibling of #81):
+    // a nested Codex-main reviewer is a review worker, NOT the delegating main loop, so it must
+    // not be delegation-gated. Without this the guard exhausts its one read/edit cycle and then
+    // repeatedly blocks the reviewer (which has no reason to run `decide`), stalling the review.
+    // The router honors DELEGATION_ROUTER_DISABLED=1 via worker_mode(); ISSUE_LOOP_ACTIVE above
+    // does not disable the delegation guard (worker_mode checks WORKER/DISABLED, not that).
+    DELEGATION_ROUTER_DISABLED: "1",
   };
 }
