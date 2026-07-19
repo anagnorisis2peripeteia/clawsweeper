@@ -629,15 +629,18 @@ export function automergeRebaseRepairReason(target: LooseRecord = {}): string | 
     .trim()
     .toUpperCase();
   if (mergeStateStatus === "DIRTY")
-    return "PR is behind or has merge conflicts and needs a cloud rebase repair before automerge";
-  if (mergeStateStatus === "BEHIND")
-    return "PR is behind the base branch and needs a cloud rebase repair before automerge";
+    return "PR has merge conflicts and needs a cloud rebase repair before automerge";
 
   const mergeable = String(target.mergeable ?? "")
     .trim()
     .toUpperCase();
   if (mergeable === "CONFLICTING")
     return "PR has merge conflicts and needs a cloud rebase repair before automerge";
+
+  // GitHub can safely merge an otherwise-ready BEHIND head with a three-way
+  // merge. Let the exact-head merge call enforce repository policy instead of
+  // rewriting a contributor branch solely because main advanced.
+  if (mergeStateStatus === "BEHIND") return null;
   return null;
 }
 
@@ -685,12 +688,30 @@ export function automergeReadinessRepairReason(reason: JsonValue): string | null
     return "PR has merge conflicts and needs a cloud rebase repair before automerge";
   }
   if (text === "merge state status is dirty") {
-    return "PR is behind or has merge conflicts and needs a cloud rebase repair before automerge";
-  }
-  if (text === "merge state status is behind") {
-    return "PR is behind the base branch and needs a cloud rebase repair before automerge";
+    return "PR has merge conflicts and needs a cloud rebase repair before automerge";
   }
   return null;
+}
+
+export function isAutomergeMergeStateReady(value: JsonValue): boolean {
+  return ["BEHIND", "CLEAN", "HAS_HOOKS"].includes(
+    String(value ?? "")
+      .trim()
+      .toUpperCase(),
+  );
+}
+
+export function existingRepairLoopModeOutcome({ intent, trustedBot }: LooseRecord) {
+  const mode = intent === "autofix" ? "autofix" : "automerge";
+  // Only an authorized human command renews landing intent. A label sweep must
+  // not manufacture the maintainer signal consumed by needs-human approval.
+  if (trustedBot) {
+    return { status: "skipped", reason: `${mode} already enabled for this PR` };
+  }
+  return {
+    status: "executed",
+    reason: `${mode} already enabled for this PR; maintainer resume intent recorded`,
+  };
 }
 
 export function isCanonicalLandingNeedsHumanText(value: JsonValue) {
@@ -1142,6 +1163,13 @@ export function trustedCloseBlockReason({
   ) {
     return "unsponsored feature-request apply policy is disabled";
   }
+  if (
+    closeKind === "pull_request" &&
+    reason === "author_pr_budget_exceeded" &&
+    !authorPrBudgetTrustedCloseEnabled()
+  ) {
+    return "author PR-budget apply policy is disabled";
+  }
   const reasonSpecificBlock = trustedCloseReasonSpecificBlockReason({
     reason,
     closeKind,
@@ -1207,6 +1235,10 @@ function unsponsoredFeatureTrustedCloseEnabled(env: LooseRecord = process.env): 
   return envFlagEnabled(env.CLAWSWEEPER_UNSPONSORED_FEATURE_CLOSE_ENABLED);
 }
 
+function authorPrBudgetTrustedCloseEnabled(env: LooseRecord = process.env): boolean {
+  return envFlagEnabled(env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED);
+}
+
 function trustedCloseReasonSpecificBlockReason({
   reason,
   closeKind,
@@ -1252,6 +1284,9 @@ function trustedCloseReasonSpecificBlockReason({
     return null;
   }
   if (closeKind !== "pull_request") return null;
+  if (reason === "author_pr_budget_exceeded") {
+    return "author_pr_budget_exceeded closes require apply-decisions live author count, inactivity, and per-run-cap proof";
+  }
   if (reason === "unconfirmed_product_direction") {
     const ageBlock = unconfirmedProductDirectionTrustedCloseAgeBlock({
       createdAt,
@@ -2397,6 +2432,15 @@ function repairDispatchLine(dispatched: LooseRecord, label: string): string {
 }
 
 function reviewDispatchLine(dispatched: LooseRecord, label: string, action: string): string {
+  if (dispatched.coordination_action === "wait_for_active_review") {
+    return `${label}: an exact-head review is already active; no duplicate review was queued.`;
+  }
+  if (dispatched.coordination_action === "reuse_completed_review") {
+    return `${label}: the existing exact-head review result is being reused.`;
+  }
+  if (dispatched.coordination_action === "retry") {
+    return `${label}: exact-head review dispatch deferred while the durable router retries.`;
+  }
   const runUrl = typeof dispatched.run_url === "string" ? dispatched.run_url : "";
   const workflow = String(dispatched.workflow ?? "").trim();
   const event = String(dispatched.event ?? "").trim();

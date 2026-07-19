@@ -3,6 +3,7 @@ import type { LooseRecord } from "./json-types.js";
 export type EventApplyAction = {
   number: number | null;
   action: string;
+  reason: string;
   durableReviewSynced: boolean;
   terminalMissingVerified: boolean;
   terminalStateVerified: boolean;
@@ -27,6 +28,8 @@ const GUARDED_OPEN_ACTIONS = new Set([
   "skipped_low_signal_live_guard",
   "skipped_same_author_pair",
 ]);
+
+const LEGACY_TUPLELESS_REVIEW_LEASE_REASON = "local report has no durable lease identity";
 
 export function exactEventPublishDisposition({
   candidateMatchesCurrentTuple,
@@ -61,11 +64,43 @@ export function exactEventPublishDisposition({
   };
 }
 
+export function exactEventRoutingDeferred({
+  candidateMatchesCurrentTuple,
+  candidateTupleState,
+  guardedOpenAction,
+  requeueLatestExpected,
+}: {
+  candidateMatchesCurrentTuple: boolean;
+  candidateTupleState: "closed" | "open" | "invalid";
+  guardedOpenAction: string | null;
+  requeueLatestExpected: boolean;
+}) {
+  return (
+    candidateMatchesCurrentTuple &&
+    candidateTupleState === "open" &&
+    guardedOpenAction === null &&
+    !requeueLatestExpected
+  );
+}
+
 export type ExactEventApplyDisposition =
   | "applied"
   | "terminal_policy_noop"
   | "source_drift"
+  | "close_coverage_deferred"
   | "unproven";
+
+export function eventApplyRequeueLatestExpected({
+  disposition,
+  exactEventPublication,
+  legacyTuplelessReviewLease,
+}: {
+  disposition: ExactEventApplyDisposition;
+  exactEventPublication: boolean;
+  legacyTuplelessReviewLease: boolean;
+}): boolean {
+  return disposition === "source_drift" || (exactEventPublication && legacyTuplelessReviewLease);
+}
 
 export function exactEventApplyProof(
   actions: readonly EventApplyAction[],
@@ -78,6 +113,7 @@ export function exactEventApplyProof(
   terminalCount: number;
   guardedOpenAction: string | null;
   latestRevisionRequeueRequired: boolean;
+  legacyTuplelessReviewLease: boolean;
   disposition: ExactEventApplyDisposition;
 } {
   const exactActions = actions.filter((entry) => entry.number === itemNumber);
@@ -104,6 +140,15 @@ export function exactEventApplyProof(
         entry.durableReviewSynced ||
         entry.terminalStateVerified,
     );
+  // A close-coverage proof is deliberately retryable, but the immutable
+  // publisher has no Codex/proof credentials. It must leave this lane for the
+  // bounded read-only apply-proof lane, not replay its old review artifact.
+  const closeCoverageDeferred =
+    exactActions.length === 1 &&
+    exactActions[0]?.action === "retry_pr_close_coverage_proof" &&
+    syncedCount === 0 &&
+    terminalCount === 0 &&
+    exactActions[0]?.terminalMissingVerified !== true;
   return {
     exactActions,
     syncedCount,
@@ -118,15 +163,20 @@ export function exactEventApplyProof(
     latestRevisionRequeueRequired:
       snapshotActionTaken === "skipped_changed_since_review" &&
       soleExactAction === "skipped_changed_since_review",
+    legacyTuplelessReviewLease:
+      soleExactAction === "skipped_stale_review_comment_sync" &&
+      soleExactResult?.reason.includes(LEGACY_TUPLELESS_REVIEW_LEASE_REASON) === true,
     disposition: hasSourceDrift
       ? sourceDrift
         ? "source_drift"
         : "unproven"
-      : terminalPolicyNoop
-        ? "terminal_policy_noop"
-        : syncedCount + terminalCount > 0
-          ? "applied"
-          : "unproven",
+      : closeCoverageDeferred
+        ? "close_coverage_deferred"
+        : terminalPolicyNoop
+          ? "terminal_policy_noop"
+          : syncedCount + terminalCount > 0
+            ? "applied"
+            : "unproven",
   };
 }
 
@@ -147,6 +197,7 @@ export function eventApplyAction(value: LooseRecord): EventApplyAction {
   return {
     number: typeof value.number === "number" ? value.number : null,
     action: typeof value.action === "string" ? value.action : "",
+    reason: typeof value.reason === "string" ? value.reason : "",
     durableReviewSynced: value.durableReviewSynced === true,
     terminalMissingVerified: value.terminalMissingVerified === true,
     terminalStateVerified: value.terminalStateVerified === true,

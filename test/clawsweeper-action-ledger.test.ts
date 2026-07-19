@@ -87,6 +87,32 @@ test("explicit action ledger finalization keeps flush failure strict", async () 
   );
 });
 
+test("action event import rejects an invalid expected producer run ID", async () => {
+  await assert.rejects(
+    main([
+      "publish-action-events",
+      "--expected-producer-job",
+      "event-review-apply",
+      "--expected-producer-run-id",
+      "not-a-run",
+    ]),
+    /expected-producer-run-id must be a numeric workflow run ID/,
+  );
+});
+
+test("action event import rejects an invalid expected producer SHA", async () => {
+  await assert.rejects(
+    main([
+      "publish-action-events",
+      "--expected-producer-job",
+      "event-review-apply",
+      "--expected-producer-sha",
+      "not-a-sha",
+    ]),
+    /expected-producer-sha must be a lowercase commit SHA/,
+  );
+});
+
 test("review and apply outcome classifiers cover terminal and resumable states", () => {
   assert.deepEqual(actionLedgerFailureDisposition(new Error("worker timed out after 30s")), {
     status: "failed",
@@ -474,11 +500,15 @@ test("review candidates start lazily and deferred items cannot remain active", (
     source.indexOf("restoreTreeModes(readonlyModeSnapshots)", reviewCatchStart),
   );
   const cleanup = reviewCatch.indexOf(
-    "deleteOwnedDedicatedReviewStartLease(acquired.itemNumber, acquired.lease)",
+    "releaseOwnedReviewLease(acquired.itemNumber, acquired.lease)",
   );
   const finalization = reviewCatch.indexOf("finishReviewActionLedger({");
   assert.ok(cleanup >= 0);
   assert.ok(finalization > cleanup);
+  assert.match(
+    source,
+    /const releaseOwnedReviewLease = \(itemNumber: number, lease: AcquiredReviewStartLease\): boolean =>[\s\S]*isSuppliedReviewStartLease\(suppliedReviewLease, lease\)[\s\S]*deleteOwnedDedicatedReviewStartLease\(itemNumber, lease\)/,
+  );
 });
 
 test("apply receipts start per item and persist mutation observation before finalization", () => {
@@ -587,7 +617,12 @@ test("apply mutation receipts bind every GitHub request attempt and preserve no-
   assert.match(source, /identity: `review_lease_post:/);
   assert.match(source, /identity: `review_lease_delete:/);
   assert.doesNotMatch(source, /identity: `apply_lease_acquire:/);
-  assert.match(source, /return \{ status: "posted", lease: acquired, didMutate: true \}/);
+  // The posted result must carry the acquired lease (now enriched with the
+  // winning comment for bulk-filer transparency patches) and didMutate: true.
+  assert.match(
+    source,
+    /return \{\s*status: "posted",\s*lease: \{ \.\.\.acquired, comment: winner\.comment \},\s*didMutate: true,?\s*\}/,
+  );
   assert.deepEqual(applyPhaseSequenceForTest(6), [2, 3, 4, 5, 6, 7]);
 });
 
@@ -759,8 +794,6 @@ test("sweep publishes complete immutable shards for every review and apply produ
     "Publish selected review comment action ledger",
     "Publish failed-review retry action ledger",
     "Finalize exact event action ledger",
-    "Publish exact event action ledger",
-    "Publish late command status action ledger",
     "Finalize apply proof action ledger",
     "Publish apply proof action events",
     "Publish apply action events",
@@ -776,7 +809,7 @@ test("sweep publishes complete immutable shards for every review and apply produ
   assert.match(workflow, /include-hidden-files: true/);
   assert.match(workflow, /--state-root "\$CLAWSWEEPER_STATE_DIR"/);
   assert.match(workflow, /durable_event_path="\$CLAWSWEEPER_STATE_DIR\/\$event_path"/);
-  assert.equal((workflow.match(/publish-action-event-paths/g) ?? []).length, 7);
+  assert.equal((workflow.match(/publish-action-event-paths/g) ?? []).length, 6);
   assert.doesNotMatch(
     workflow,
     /--message "chore: append (?:review|apply).*action ledger"[\s\S]{0,180}--path "ledger\/v1\/events"/,

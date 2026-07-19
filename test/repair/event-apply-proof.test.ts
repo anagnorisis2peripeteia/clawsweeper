@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   eventApplyAction,
+  eventApplyRequeueLatestExpected,
   eventRecordActionTaken,
   exactEventApplyProof,
   exactEventPublishDisposition,
+  exactEventRoutingDeferred,
 } from "../../src/repair/event-apply-proof.ts";
 
 test("exact event publish dispositions require the current tuple and preserve terminal precedence", () => {
@@ -135,6 +137,46 @@ test("exact event publish dispositions reject stale routable sync tuples", () =>
   }
 });
 
+test("exact event routing defers only current nonterminal verdicts", () => {
+  assert.equal(
+    exactEventRoutingDeferred({
+      candidateMatchesCurrentTuple: true,
+      candidateTupleState: "open",
+      guardedOpenAction: null,
+      requeueLatestExpected: false,
+    }),
+    true,
+  );
+  for (const candidate of [
+    {
+      candidateMatchesCurrentTuple: false,
+      candidateTupleState: "open" as const,
+      guardedOpenAction: null,
+      requeueLatestExpected: false,
+    },
+    {
+      candidateMatchesCurrentTuple: true,
+      candidateTupleState: "closed" as const,
+      guardedOpenAction: null,
+      requeueLatestExpected: false,
+    },
+    {
+      candidateMatchesCurrentTuple: true,
+      candidateTupleState: "open" as const,
+      guardedOpenAction: "skipped_locked_conversation",
+      requeueLatestExpected: false,
+    },
+    {
+      candidateMatchesCurrentTuple: true,
+      candidateTupleState: "open" as const,
+      guardedOpenAction: null,
+      requeueLatestExpected: true,
+    },
+  ]) {
+    assert.equal(exactEventRoutingDeferred(candidate), false);
+  }
+});
+
 test("exact event proof accepts durable sync independently of the apply action name", () => {
   const proof = exactEventApplyProof(
     [
@@ -258,6 +300,23 @@ test("exact event proof accepts only explicit trusted no-action dispositions", (
   assert.equal(sourceDrift.disposition, "source_drift");
   assert.equal(unproven.disposition, "unproven");
 });
+
+test("exact event proof defers a close-coverage retry to the proof-capable apply lane", () => {
+  const proof = exactEventApplyProof(
+    [eventApplyAction({ number: 42, action: "retry_pr_close_coverage_proof" })],
+    42,
+  );
+
+  assert.equal(proof.disposition, "close_coverage_deferred");
+  assert.equal(
+    eventApplyRequeueLatestExpected({
+      disposition: proof.disposition,
+      exactEventPublication: true,
+      legacyTuplelessReviewLease: proof.legacyTuplelessReviewLease,
+    }),
+    false,
+  );
+});
 test("exact event proof completes live-shaped deterministic guarded-open results", () => {
   for (const action of [
     "skipped_same_author_pair",
@@ -291,6 +350,49 @@ test("exact event proof keeps changed-since-review on the latest-revision requeu
 
   assert.equal(proof.guardedOpenAction, null);
   assert.equal(proof.latestRevisionRequeueRequired, true);
+});
+
+test("exact event proof requeues only the guarded legacy tuple-less artifact path", () => {
+  const legacy = exactEventApplyProof(
+    [
+      eventApplyAction({
+        number: 42,
+        action: "skipped_stale_review_comment_sync",
+        reason:
+          "live durable review tuple has lease comment 4979165844, but the local report has no durable lease identity",
+      }),
+    ],
+    42,
+  );
+  const newerVerdict = exactEventApplyProof(
+    [
+      eventApplyAction({
+        number: 42,
+        action: "skipped_stale_review_comment_sync",
+        reason: "live durable review comment is newer than the local report",
+      }),
+    ],
+    42,
+  );
+
+  assert.equal(legacy.legacyTuplelessReviewLease, true);
+  assert.equal(newerVerdict.legacyTuplelessReviewLease, false);
+  assert.equal(
+    eventApplyRequeueLatestExpected({
+      disposition: legacy.disposition,
+      exactEventPublication: true,
+      legacyTuplelessReviewLease: legacy.legacyTuplelessReviewLease,
+    }),
+    true,
+  );
+  assert.equal(
+    eventApplyRequeueLatestExpected({
+      disposition: newerVerdict.disposition,
+      exactEventPublication: true,
+      legacyTuplelessReviewLease: newerVerdict.legacyTuplelessReviewLease,
+    }),
+    false,
+  );
 });
 
 test("guarded-open proof rejects mismatches, extra results, and transient skips", () => {

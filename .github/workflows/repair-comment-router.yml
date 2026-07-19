@@ -78,9 +78,12 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   CLAWSWEEPER_APP_CLIENT_ID: Iv23liOECG0slfuhz093
   CLAWSWEEPER_UNSPONSORED_FEATURE_CLOSE_ENABLED: ${{ vars.CLAWSWEEPER_UNSPONSORED_FEATURE_CLOSE_ENABLED || 'false' }}
+  CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED: ${{ vars.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED || 'false' }}
 
 concurrency:
-  group: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.comment_id && format('repair-comment-router-{0}-comment-{1}', github.event.client_payload.target_repo || 'openclaw/openclaw', github.event.client_payload.comment_id) || format('repair-comment-router-{0}', github.event.inputs.target_repo || github.event.client_payload.target_repo || 'openclaw/openclaw') }}
+  # GitHub retains only one pending run per concurrency group. Exact-item verdict
+  # handoffs need their own group so unrelated router traffic cannot replace them.
+  group: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.comment_id && format('repair-comment-router-{0}-comment-{1}', github.event.client_payload.target_repo || 'openclaw/openclaw', github.event.client_payload.comment_id) || github.event_name == 'workflow_dispatch' && github.event.inputs.item_numbers != '' && format('repair-comment-router-{0}-items-{1}', github.event.inputs.target_repo || 'openclaw/openclaw', github.event.inputs.item_numbers) || format('repair-comment-router-{0}', github.event.inputs.target_repo || github.event.client_payload.target_repo || 'openclaw/openclaw') }}
   cancel-in-progress: false
 
 jobs:
@@ -100,22 +103,7 @@ jobs:
             results
             schema/clawsweeper-pr-close-coverage-proof.schema.json
             scripts/hydrate-state.ts
-            src/clawsweeper-text.ts
-            src/command.ts
-            src/codex-env.ts
-            src/codex-output-capture.ts
-            src/codex-spawn.ts
-            src/codex-process-worker.ts
-            src/codex-process.ts
-            src/codex-transient.ts
-            src/github-json.ts
-            src/github-retry.ts
-            src/pr-close-coverage-proof.ts
-            src/action-ledger-files.ts
-            src/action-ledger-runtime.ts
-            src/action-ledger.ts
-            src/repair
-            src/repository-profiles.ts
+            src
             package.json
             pnpm-lock.yaml
             pnpm-workspace.yaml
@@ -189,6 +177,7 @@ jobs:
           CLAWSWEEPER_DISPATCH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
           CLAWSWEEPER_MUTATION_TOKEN_SOURCE: clawsweeper-app
           CLAWSWEEPER_ALLOW_MERGE: ${{ vars.CLAWSWEEPER_ALLOW_MERGE || '0' }}
+          CLAWSWEEPER_STATUS_INGEST_TOKEN: ${{ secrets.CLAWSWEEPER_STATUS_INGEST_TOKEN }}
           CLAWSWEEPER_ACTION_LEDGER_INVOCATION: initial
         run: |
           set -euo pipefail
@@ -322,6 +311,7 @@ jobs:
           CLAWSWEEPER_DISPATCH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
           CLAWSWEEPER_MUTATION_TOKEN_SOURCE: clawsweeper-app
           CLAWSWEEPER_ALLOW_MERGE: ${{ vars.CLAWSWEEPER_ALLOW_MERGE || '0' }}
+          CLAWSWEEPER_STATUS_INGEST_TOKEN: ${{ secrets.CLAWSWEEPER_STATUS_INGEST_TOKEN }}
           CLAWSWEEPER_ACTION_LEDGER_INVOCATION: retry
         run: |
           set -euo pipefail

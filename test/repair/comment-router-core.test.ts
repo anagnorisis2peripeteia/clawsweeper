@@ -1102,6 +1102,17 @@ test("automerge activation does not send missing changelog to repair", () => {
     }),
     null,
   );
+
+  assert.equal(
+    automergeActivationRepairReason({
+      intent: "automerge",
+      repo: "openclaw/openclaw",
+      title: "fix(memory): preserve session corpus labels",
+      files: [{ path: "extensions/memory-core/src/tools.ts" }],
+      target: { checks: { blockers: [] }, merge_state_status: "BEHIND", mergeable: "MERGEABLE" },
+    }),
+    null,
+  );
 });
 
 test("renderAutomergeJob documents autofix as repair-only", () => {
@@ -1840,7 +1851,7 @@ test("active review comments cannot replay their previous trusted verdict", () =
   );
 });
 
-test("label-sweep classification checks the exact-head review lease before dispatch planning", () => {
+test("review dispatch coordination guards label sweeps and maintainer mode commands", () => {
   const source = readFileSync("src/repair/comment-router.ts", "utf8");
   const activeLease = source.indexOf("freshExactHeadReviewStartLease({");
   const repairPlanning = source.indexOf("const failedChecksRepairReason", activeLease);
@@ -1873,10 +1884,12 @@ test("label-sweep classification checks the exact-head review lease before dispa
   const trustedVerdictCheck = executeCommand.indexOf(
     "trustedAutomationReviewLeaseBlockReason(command)",
   );
-  const preMutationCheck = executeCommand.indexOf("repairLoopReviewDispatchBlockReason(command)");
+  const preMutationCheck = executeCommand.indexOf(
+    "repairLoopPreMutationReviewDispatchDecision(command)",
+  );
   const firstMutation = executeCommand.indexOf("ensureAutomergeJob(command)", preMutationCheck);
   const dispatchRecheck = executeCommand.indexOf(
-    "repairLoopReviewDispatchBlockReason(command)",
+    "reviewDispatchDecisionForCommand(command)",
     preMutationCheck + 1,
   );
   const dispatch = executeCommand.indexOf("dispatchClawSweeperReview(command)", dispatchRecheck);
@@ -1886,17 +1899,31 @@ test("label-sweep classification checks the exact-head review lease before dispa
   assert.ok(firstMutation > preMutationCheck);
   assert.ok(dispatchRecheck > firstMutation);
   assert.ok(dispatch > dispatchRecheck);
+  const postMutationCoordination = executeCommand.slice(dispatchRecheck, dispatch);
+  assert.match(postMutationCoordination, /markCoordinatedReviewDispatchActions\(\{/);
 
   const dispatchGuard = source.slice(
-    source.indexOf("function repairLoopReviewDispatchBlockReason"),
-    source.indexOf("function trustedAutomationReviewLeaseBlockReason"),
+    source.indexOf("function repairLoopPreMutationReviewDispatchDecision"),
+    source.indexOf("function trustedAutomationSourceRevisionBlockReason"),
+  );
+  assert.match(
+    dispatchGuard,
+    /automation_source !== "repair_loop_label_sweep"[\s\S]*?return \{ action: "dispatch" \}/,
   );
   assert.equal(dispatchGuard.match(/fetchPullRequestView\(number\)/g)?.length, 2);
   assert.match(dispatchGuard, /issues\/\$\{number\}\/comments\?per_page=100/);
   assert.match(dispatchGuard, /nowMs:\s*Date\.now\(\)/);
   assert.match(dispatchGuard, /trustedExactHeadReviewCompletionSince\(\{/);
-  assert.match(dispatchGuard, /sinceMs:\s*sweepStartedAtMs/);
-  assert.match(dispatchGuard, /next router pass will route it/);
+  assert.match(dispatchGuard, /sinceMs:\s*commandStartedAtMs/);
+  assert.match(dispatchGuard, /decideReviewDispatchCoordination\(\{/);
+  assert.match(dispatchGuard, /completedReviewAt:/);
+  const coordinatedActions = source.slice(
+    source.indexOf("function markCoordinatedReviewDispatchActions"),
+    source.indexOf("function trustedAutomationSourceRevisionBlockReason"),
+  );
+  assert.match(coordinatedActions, /ensure_automerge_job/);
+  assert.match(coordinatedActions, /status:\s*"executed"/);
+  assert.match(coordinatedActions, /coordination_action:\s*decision\.action/);
   const sourceRevisionGuard = source.slice(
     source.indexOf("function trustedAutomationSourceRevisionBlockReason"),
     source.indexOf("function trustedAutomationReviewLeaseBlockReason"),
@@ -2334,6 +2361,26 @@ test("trusted close gates block protected labels, source drift, and unsupported 
       delete process.env.CLAWSWEEPER_UNSPONSORED_FEATURE_CLOSE_ENABLED;
     } else {
       process.env.CLAWSWEEPER_UNSPONSORED_FEATURE_CLOSE_ENABLED = originalUnsponsoredPolicy;
+    }
+  }
+  const originalAuthorBudgetPolicy = process.env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED;
+  delete process.env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED;
+  try {
+    const authorBudgetBase = { ...base, closeReason: "author_pr_budget_exceeded" };
+    assert.match(
+      trustedCloseBlockReason(authorBudgetBase),
+      /author PR-budget apply policy is disabled/,
+    );
+    process.env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED = "true";
+    assert.match(
+      trustedCloseBlockReason(authorBudgetBase),
+      /require apply-decisions live author count, inactivity, and per-run-cap proof/,
+    );
+  } finally {
+    if (originalAuthorBudgetPolicy === undefined) {
+      delete process.env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED;
+    } else {
+      process.env.CLAWSWEEPER_AUTHOR_PR_BUDGET_CLOSE_ENABLED = originalAuthorBudgetPolicy;
     }
   }
   assert.match(
@@ -3107,6 +3154,49 @@ test("renderResponse reports autofix repair-only opt-in", () => {
   assert.doesNotMatch(body, /will merge/);
 });
 
+test("renderResponse reports reuse of an active exact-head review", () => {
+  const body = renderResponse(
+    {
+      comment_id: "460",
+      intent: "automerge",
+      repo: "openclaw/clawsweeper",
+      target: { head_sha: "a".repeat(40) },
+      actions: [{ action: "label", label: "clawsweeper:automerge", status: "executed" }],
+    },
+    {
+      clawsweeper: {
+        coordination_action: "wait_for_active_review",
+        status: "waiting",
+      },
+    },
+  );
+
+  assert.match(body, /ClawSweeper automerge is enabled/);
+  assert.match(body, /exact-head review is already active/);
+  assert.match(body, /no duplicate review was queued/);
+  assert.doesNotMatch(body, /exact-head review queued/);
+});
+
+test("renderResponse reports reuse of a completed exact-head review", () => {
+  const body = renderResponse(
+    {
+      comment_id: "4601",
+      intent: "autofix",
+      repo: "openclaw/clawsweeper",
+      target: { head_sha: "b".repeat(40) },
+    },
+    {
+      clawsweeper: {
+        coordination_action: "reuse_completed_review",
+        status: "skipped",
+      },
+    },
+  );
+
+  assert.match(body, /ClawSweeper autofix is enabled/);
+  assert.match(body, /existing exact-head review result is being reused/);
+});
+
 test("renderResponse reports terminal autofix success without merge", () => {
   const body = renderResponse(
     {
@@ -3607,12 +3697,9 @@ test("automerge live readiness blocks become repair reasons", () => {
   );
   assert.equal(
     automergeReadinessRepairReason("merge state status is DIRTY"),
-    "PR is behind or has merge conflicts and needs a cloud rebase repair before automerge",
+    "PR has merge conflicts and needs a cloud rebase repair before automerge",
   );
-  assert.equal(
-    automergeReadinessRepairReason("merge state status is BEHIND"),
-    "PR is behind the base branch and needs a cloud rebase repair before automerge",
-  );
+  assert.equal(automergeReadinessRepairReason("merge state status is BEHIND"), null);
   assert.equal(automergeReadinessRepairReason("pull request is draft"), null);
 });
 
