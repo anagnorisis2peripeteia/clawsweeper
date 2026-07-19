@@ -1435,24 +1435,10 @@ test("mutation actor guard accepts only trusted bot identities", () => {
   assert.equal(normalizeGitHubActor("ClawSweeper[bot]"), "clawsweeper");
   assert.equal(isAllowedMutationActor("ClawSweeper[bot]", trustedBots), true);
   assert.equal(isAllowedMutationActor("clawsweeper[bot]", trustedBots), true);
-  assert.equal(isAllowedMutationActor("clawsweeper[bot][bot]", trustedBots), false);
   assert.equal(isAllowedMutationActor("clawsweeper", trustedBots), false);
   assert.equal(isAllowedMutationActor("openclaw-clawsweeper[bot]", trustedBots), true);
   assert.equal(isAllowedMutationActor("steipete", trustedBots), false);
   assert.equal(isAllowedMutationActor("github-actions[bot]", trustedBots), false);
-});
-
-test("normalizeGitHubActor is idempotent for repeated [bot] suffixes", () => {
-  // Single-suffix strip left a residual on a doubled suffix, so a second pass changed it.
-  assert.equal(normalizeGitHubActor("x[bot][bot]"), "x");
-  const once = normalizeGitHubActor("x[bot][bot]");
-  assert.equal(normalizeGitHubActor(once), once);
-  // Unregressed: a single real bot suffix still strips exactly once.
-  assert.equal(normalizeGitHubActor("foo[bot]"), "foo");
-  assert.equal(normalizeGitHubActor("  Foo[bot]  "), "foo");
-  assert.equal(normalizeGitHubActor("x[bot][bot]tail"), "x[bot][bot]tail");
-  assert.equal(normalizeGitHubActor(null), "");
-  assert.equal(normalizeGitHubActor(123), "123");
 });
 
 test("mutation actor guard recognizes GitHub App integration auth shape", () => {

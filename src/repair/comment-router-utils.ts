@@ -407,8 +407,6 @@ export function isAllowedMutationActor(login: JsonValue, trustedBots: Iterable<s
     .trim()
     .toLowerCase();
   if (!actor) return false;
-  // Security boundary: compare the submitted actor exactly. Do not use normalizeGitHubActor
-  // here because its grouping semantics intentionally collapse repeated trailing bot suffixes.
   for (const trustedBot of trustedBots) {
     if (
       String(trustedBot ?? "")
@@ -421,14 +419,10 @@ export function isAllowedMutationActor(login: JsonValue, trustedBots: Iterable<s
 }
 
 export function normalizeGitHubActor(login: JsonValue) {
-  return (
-    String(login ?? "")
-      .trim()
-      .toLowerCase()
-      // This helper groups command requesters; mutation authorization uses the exact raw actor.
-      // Strip ALL trailing [bot] suffixes so grouping remains idempotent.
-      .replace(/(\[bot\])+$/i, "")
-  );
+  return String(login ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\[bot\]$/i, "");
 }
 
 export function isGitHubAppIntegrationAuthError(message: JsonValue) {

@@ -27,9 +27,6 @@ export function slug(value: unknown, fallback = "unknown", maxLength = 120) {
       .toLowerCase()
       .replace(/[^a-z0-9_.-]+/g, "-")
       .replace(/^-+|-+$/g, "")
-      .slice(0, maxLength)
-      // Re-trim: slicing to maxLength can cut on a "-" boundary and re-introduce a trailing
-      // dash, which made slug non-idempotent (slug(slug(x)) !== slug(x)).
-      .replace(/-+$/g, "") || fallback
+      .slice(0, maxLength) || fallback
   );
 }

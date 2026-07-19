@@ -11,10 +11,6 @@ export function truncateText(value: unknown, maxLength: number): string {
 export function trimMiddle(text: string, maxLength: number): string {
   if (text.length <= maxLength) return text;
   const edge = Math.floor((maxLength - 120) / 2);
-  // For maxLength < 120 the head/tail split has no room: `edge` goes negative, the slices
-  // read from the wrong ends (and `slice(-0)` returns the whole string), and the reported
-  // "truncated N" count exceeds text.length. Fall back to a simple head truncation.
-  if (edge <= 0) return truncateText(text, Math.max(0, maxLength));
   return `${text.slice(0, edge)}\n\n... truncated ${text.length - edge * 2} chars ...\n\n${text.slice(-edge)}`;
 }
 
