@@ -65,7 +65,7 @@
       "target_repo": "pytorch/pytorch",
       "display_name": "PyTorch",
       "checkout_dir": "pytorch",
-      "prompt_note": "External repo \u2014 LOCAL review only via `local-review --engine claude`. Never auto-close or comment. Apply the repo checkout's own AGENTS.md->CLAUDE.md->.claude/skills as the PyTorch MPS review contract. Substitutes for the absent @clawsweeper bot.",
+      "prompt_note": "External repo — LOCAL review only via `local-review --engine claude`. Never auto-close or comment. Apply the repo checkout's own AGENTS.md->CLAUDE.md->.claude/skills as the PyTorch MPS review contract. Substitutes for the absent @clawsweeper bot.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
@@ -75,10 +75,25 @@
       "changed_gate": null
     },
     {
+      "target_repo": "google-deepmind/formal-conjectures",
+      "display_name": "Formal Conjectures",
+      "checkout_dir": "formal-conjectures-erdos128",
+      "prompt_note": "External repo: review formal statements against their cited mathematical sources, verify quantifier scope and finite edge/cardinality encodings, and never auto-close or comment.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": null,
+      "validation_commands": [
+        "lake --wfail build"
+      ],
+      "changed_gate": null
+    },
+    {
       "target_repo": "anomalyco/opencode",
       "display_name": "OpenCode",
       "checkout_dir": "opencode",
-      "prompt_note": "External repo \u2014 LOCAL review only via `local-review --engine Codex`. Never auto-close or comment. Apply the repo checkout's own CONTRIBUTING.md + AGENTS.md + PR template + workflows as the review contract. Substitutes for the absent @clawsweeper bot.",
+      "prompt_note": "External repo — LOCAL review only via `local-review --engine Codex`. Never auto-close or comment. Apply the repo checkout's own CONTRIBUTING.md + AGENTS.md + PR template + workflows as the review contract. Substitutes for the absent @clawsweeper bot.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
@@ -103,10 +118,23 @@
       "changed_gate": null
     },
     {
+      "target_repo": "stryker-mutator/stryker-net",
+      "display_name": "Stryker.NET",
+      "checkout_dir": "stryker-net",
+      "prompt_note": "Stryker.NET, the .NET mutation testing tool (upstream). Review conservatively: the repo's own CONTRIBUTING + .github/instructions (conventional-commit, csharp, security-and-owasp, self-explanatory-code-commenting) are authoritative. Focus on the analyzer-config / source-generator bug classes - a generator that silently emits nothing must not be misattributed as a mutation or internal Stryker error - plus rollback correctness and whether unit tests actually exercise the changed branches. Squash-merge only.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "npm",
+      "validation_commands": [],
+      "changed_gate": null
+    },
+    {
       "target_repo": "anagnorisis2peripeteia/agent-skills",
       "display_name": "Agent Skills",
       "checkout_dir": "agent-skills",
-      "prompt_note": "Personal skill and plugin repository \u2014 LOCAL review only. Apply the checkout README and review lifecycle changes conservatively. For Issue Loop, enforce fail-closed publication, sanitized persistence, duplicate-aware reporting, stable runtime convergence, and transactional watcher rollback. Never auto-close or comment from local review.",
+      "prompt_note": "Personal skill and plugin repository — LOCAL review only. Apply the checkout README and review lifecycle changes conservatively. For Issue Loop, enforce fail-closed publication, sanitized persistence, duplicate-aware reporting, stable runtime convergence, and transactional watcher rollback. Never auto-close or comment from local review.",
       "apply_close_rules": {
         "issue": [],
         "pull_request": []
@@ -139,6 +167,101 @@
       },
       "package_manager": "npm",
       "validation_commands": [],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "anagnorisis2peripeteia/signalkrebs",
+      "display_name": "Signalkrebs",
+      "checkout_dir": "signalkrebs",
+      "prompt_note": "Our own diff-scoped, fail-closed CONCURRENCY PR-gate CLI (marmorkrebs/einsiedlerkrebs sibling, TS/node). LOCAL review only; never auto-close or comment. Review fail-closed semantics hard: a lane may not score unless it caught its planted-race fixture THIS run, and a tool failure, empty run, timeout misclassification, or lane-dead verdict must never read as a pass. Detector/probe edits are invalid without a passing validate:detector lane (planted race caught+anchored, clean fixture clean, toolchain-hidden fails closed). Apply the repo's own AGENTS.md/README as the review contract.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "npm",
+      "validation_commands": [],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "steipete/CodexBar",
+      "display_name": "CodexBar",
+      "checkout_dir": "CodexBar",
+      "prompt_note": "steipete's Swift macOS menu-bar AI-usage tracker (UPSTREAM, not ours). This review vets a concurrency fix surfaced by signalkrebs (swift-tsan). Judge whether the lock-based fix is the BEST solution: correct (no deadlock — note the setter recomputes the mirror via the isDisabled getter under the lock, hence NSRecursiveLock), minimal, behavior-preserving, and idiomatic to the repo (matches the existing NSLock sibling). Flag any simpler/safer approach (e.g. Swift Mutex, a lock-held helper vs recursive lock).",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "swift",
+      "validation_commands": [],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "pikvm/kvmd",
+      "display_name": "PiKVM KVMD",
+      "checkout_dir": "kvmd",
+      "prompt_note": "External upstream reviewed locally only. Apply pikvm/kvmd's current README, workflow, setup.py, and EditorConfig plus the local kvmd additions contract. For kvmd-localhid changes, review evdev capability classification, per-device key filtering, unsupported-key handling, keyboard/mouse regressions, and exact real-device base-versus-HEAD evidence. Never auto-close, comment, push, or create an issue or PR.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": null,
+      "validation_commands": [
+        "make testenv",
+        "make tox CMD=\"tox -c testenv/tox.ini\""
+      ],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "gregkh/usb",
+      "display_name": "Linux USB maintainer tree",
+      "checkout_dir": "linux-usb",
+      "prompt_note": "External kernel.org maintainer tree, reviewed locally only. The Linux in-tree process and coding-assistant policies are authoritative. Review USB gadget descriptor correctness, standards-required bcdUSB minima, unset/default behavior, configfs compatibility, and exact base-versus-HEAD host observations. Never auto-close, comment, push, or send email.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": null,
+      "validation_commands": [],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "openclaw/openclaw-windows-node",
+      "display_name": "OpenClaw Windows Node",
+      "checkout_dir": "oc-windows-node",
+      "prompt_note": "Windows companion suite (C#/.NET 10, WinUI 3). Upstream (openclaw-owned) — per-PR approval. Base ref origin/main. AGENTS.md is the base contract.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      }
+    },
+    {
+      "target_repo": "openclaw/crabfleet",
+      "display_name": "Crabfleet",
+      "checkout_dir": "crabfleet",
+      "prompt_note": "Use the crabfleet source tree and current main branch. Cloudflare Workers + D1 node-lifecycle worker: review with the concurrency lens -- D1 has no cross-invocation serialization, so check-then-act across an await can interleave with concurrent requests, cron scheduled() handlers, and reconcilers (guard-asymmetry: a sibling path guards it, this path forgot). Upstream/conservative: do NOT auto-close issues or pull requests.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "pnpm",
+      "validation_commands": [
+        "pnpm check"
+      ],
+      "changed_gate": null
+    },
+    {
+      "target_repo": "steipete/peekaboo",
+      "display_name": "Peekaboo",
+      "checkout_dir": "peekaboo",
+      "prompt_note": "Use the Peekaboo source tree and current main branch. Swift 6.2 MCP/CLI automation tool. Review MCP tool trust-boundary and path-confinement changes with high rigor (model-controlled tool arguments are untrusted). Keep everything open for maintainer triage; do not propose auto-close.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "package_manager": "pnpm",
+      "validation_commands": [
+        "pnpm run test:safe"
+      ],
       "changed_gate": null
     }
   ],
