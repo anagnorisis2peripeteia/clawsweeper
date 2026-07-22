@@ -16442,6 +16442,15 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // is invoked explicitly, NOT folded into the authoritative gate. Explicit engines run
   // single (exactly the one asked for; use `auto` for the strong-tier fallback).
   if (requested === "auto") return ["agy-claude", "codex", "claude"];
+  // agy cannot complete a headless read-only review that needs to run commands
+  // (issue #100): --add-dir grants file reads, but the sandboxed reviewer still
+  // soft-denies Bash in --print mode, and --dangerously-skip-permissions — agy's
+  // only way to auto-approve commands — also re-enables file edits even under
+  // --mode plan. So an explicit agy engine (the final-gate selector's usual pick)
+  // falls through to the good-model floor (codex → claude) on failure instead of
+  // hard-failing the gate; a working agy verdict is still returned when it produces one.
+  if (requested === "agy-claude") return ["agy-claude", "codex", "claude"];
+  if (requested === "agy-gemini") return ["agy-gemini", "codex", "claude"];
   // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model, so it
   // still flags PR-body/proof/mantis flaws, not just code (the code-only pass is the
   // separate autoreview/commit-sweeper gate). qwen-H100 (opencode) runs FIRST — free,
@@ -16954,6 +16963,12 @@ function engineSpawnSpec(
     case "agy-claude":
     case "agy-gemini":
       // agy 1.0.10: the prompt is the VALUE of --print (no stdin path).
+      // --add-dir registers the review checkout as an agy workspace so read_file/
+      // ListDir need no confirmation — without it, headless --print mode soft-denies
+      // every file tool outside the cwd workspace and the reviewer emits no verdict
+      // (issue #100). --mode plan is agy's non-editing mode: --sandbox only enforces
+      // terminal restrictions, so plan mode is what actually blocks its file-edit
+      // tool on the checkout (matches ask-agy's read-only convention, agy issue #19).
       return {
         command: "agy",
         args: [
@@ -16963,7 +16978,11 @@ function engineSpawnSpec(
           `${Math.max(1, Math.ceil(remainingMs / 1000))}s`,
           "--log-file",
           join(workDir, `${engine}.log`),
+          "--mode",
+          "plan",
           "--sandbox",
+          "--add-dir",
+          openclawDir,
           "--print",
           prompt,
         ],
@@ -17025,6 +17044,18 @@ function reviewEngineAttemptLimit(engine: ReviewEngine): number {
 function shouldAbortStructuredRetry(engine: ReviewEngine, errorMessage: string): boolean {
   if (engine === "opencode") return false;
   return /model output contained no JSON object/i.test(errorMessage);
+}
+
+// agy in headless --print mode auto-denies any tool it cannot pre-authorize —
+// Bash/command always, and file tools outside --add-dir — printing this verbatim
+// to stderr / its --log-file. That is an ENVIRONMENT limitation, not a transient
+// error: retrying the same engine reproduces it byte-for-byte. Detecting it lets
+// the review fail this engine FAST (no wasted re-asks) and fall through the
+// cascade to a good-model engine that can actually run the review (issue #100).
+function isHeadlessToolDenial(text: string): boolean {
+  return /headless mode cannot prompt|no output produced\b.*\bpermission|soft-denying tool confirmation/i.test(
+    text,
+  );
 }
 
 // Drive a non-codex CLI to produce a schema-valid Decision. Embeds the decision
@@ -17123,6 +17154,15 @@ function runReviewWithEngine(options: {
           retryable: false,
         });
       }
+      if (isHeadlessToolDenial(quotaOutput)) {
+        throw new CodexReviewError({
+          message: `${options.engine} cannot run a headless review here — a tool permission was auto-denied; not retrying so the cascade falls through to a good-model engine.`,
+          status: result.status ?? null,
+          stdout,
+          stderr: result.stderr,
+          retryable: false,
+        });
+      }
       continue;
     }
     try {
@@ -17195,6 +17235,19 @@ function runReviewWithEngine(options: {
         console.error(
           `[review] ${new Date().toISOString()} ${options.engine}-invalid-decision #${options.item.number} attempt=${attempt} ${priorError}`,
         );
+      }
+      if (
+        isHeadlessToolDenial(
+          `${result.stderr}\n${readEngineQuotaLog(options.workDir, options.engine)}`,
+        )
+      ) {
+        throw new CodexReviewError({
+          message: `${options.engine} produced no verdict — a tool permission was auto-denied in headless mode; not retrying so the cascade falls through to a good-model engine.`,
+          status: null,
+          stdout,
+          stderr: result.stderr,
+          retryable: false,
+        });
       }
       if (shouldAbortStructuredRetry(options.engine, priorError)) {
         throw new CodexReviewError({
