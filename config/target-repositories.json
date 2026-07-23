@@ -263,6 +263,20 @@
         "pnpm run test:safe"
       ],
       "changed_gate": null
+    },
+    {
+      "target_repo": "ImperialCollegeLondon/FLT",
+      "display_name": "FLT (Fermat's Last Theorem in Lean)",
+      "checkout_dir": "FLT",
+      "prompt_note": "Lean 4 / mathlib formalization of FLT (Kevin Buzzard, Imperial). Local review only: judge Lean proofs and instance/defeq hygiene against mathlib conventions and the repo's CONTRIBUTING claim/propose flow. Build gate is lake build; there is no test pyramid - the type checker is the proof. Never auto-act on issues/PRs.",
+      "apply_close_rules": {
+        "issue": [],
+        "pull_request": []
+      },
+      "validation_commands": [
+        "lake build FLT"
+      ],
+      "changed_gate": null
     }
   ],
   "generic_fallbacks": [
