@@ -337,6 +337,12 @@ that still lack maintainer-confirmed direction. Live maintainer signals and
 automation opt-ins veto apply. See
 [`docs/product-direction-close-policy.md`](docs/product-direction-close-policy.md).
 
+The default-off per-author PR-budget policy gradually trims an external
+author's oldest lowest-signal PRs only after apply verifies the live repository
+count, seven-day inactivity, rating/proof eligibility, protected labels, and
+maintainer engagement. See
+[`docs/author-pr-budget-close-policy.md`](docs/author-pr-budget-close-policy.md).
+
 ## How It Works
 
 ClawSweeper is split into four operational lanes:
@@ -430,23 +436,25 @@ handles only the selected item, uploads a hash-bound GitHub Actions artifact,
 enqueues a separate durable publication lease, and then releases its review
 lease without checking out or pushing the state repository. The queue retries
 publication independently, so a cancelled publisher does not rerun Codex. A
-globally serialized publisher validates that artifact's workflow run, queue
-tuple, target, decision digest, file inventory, sizes, and SHA-256 hashes before
-it receives write tokens. Publication leases reserve the global publisher
-lane's maximum queue wait; terminal-run reconciliation releases dead dispatches
-early. The publisher then uses the same review and apply paths with only the
+Durable Object-bounded publisher lane (24 base, adaptively capped at 48)
+validates each artifact's workflow run, queue tuple, target, decision digest,
+file inventory, sizes, and SHA-256 hashes before it receives write tokens.
+Publication leases reserve the bounded publisher lane's maximum queue wait;
+terminal-run reconciliation releases dead dispatches early. The publisher then
+uses the same review and apply paths with only the
 immediate-safe reasons enabled by default:
 `implemented_on_main`, `duplicate_or_superseded`, and
-`low_signal_unmergeable_pr`. Artifacts remain available for 90 days. A
-publication that still cannot finish after 80 days expires its artifact handoff
-and queues one fresh exact review, avoiding an unrecoverable missing-artifact
-loop while leaving a ten-day retention margin.
+`low_signal_unmergeable_pr`. A stale tuple now terminates as `superseded`
+instead of retrying, while permanent failures enter a bounded dead-letter store
+after their confirmation retries. Artifacts remain available for 90 days; three
+confirmed unavailable-artifact attempts queue one fresh exact review instead of
+waiting for the retention deadline.
 
 Deterministic terminal and remain-open outcomes flow through the same publisher.
 Ordinary synced verdicts publish their exact durable comment, then queue an
-executing target-wide comment-router scan. Exact and batch review publishers
-share one state-publisher concurrency lane, so review generation stays parallel
-while Git-backed publication is serialized. Direct exact-event viable-issue
+executing target-wide comment-router scan. Exact publishers use the bounded
+Durable Object lane while batch publishers remain per-target serialized. Direct
+exact-event viable-issue
 implementation dispatch stays disabled; the bounded broad publish/backfill lane
 owns that separately revalidated intake. Publication still does not claim an
 atomic state-publish-and-route boundary.
@@ -511,6 +519,9 @@ Repair internals are documented in
 [`docs/repair/README.md`](docs/repair/README.md), and the automerge state
 machine is documented in
 [`docs/repair/automerge-flow.md`](docs/repair/automerge-flow.md).
+The production automerge command chain can be validated before merge with the
+local-container, CI, and Crabbox harness in
+[`docs/repair/automerge-e2e.md`](docs/repair/automerge-e2e.md).
 
 ### Commit Review Lane
 
@@ -763,6 +774,9 @@ is active. Throughput defaults live in
 
 ClawSweeper has one main capacity knob:
 `config/automation-limits.json` -> `workers.max`. The current value is `128`.
+This is a Codex worker budget, not a GitHub Actions runner limit. Deterministic
+exact-review publishers, comment routers, and lease reconcilers are
+control-plane workflows and do not consume these 128 slots.
 Lane limits are derived from that number: normal review defaults to 89 shards
 for manual/backstop and scheduled runs, hot intake up to 44 shards, commit
 review 6 commits per page, and existing repair/issue implementation lanes use
@@ -801,7 +815,16 @@ pnpm run oxformat
 The `CI` GitHub Actions workflow uses the latest Node release and runs
 `pnpm run check` on pushes, pull requests, and manual dispatches. The check gate
 includes the full test suite, a strict changed-surface coverage threshold, and a
-full compiled-repo coverage ratchet.
+full compiled-repo coverage ratchet. It builds once, runs independent static and
+lint checks with bounded phase-level parallelism, and uses the full coverage run
+as the single source of complete test results. Standalone `test`, `test:repair`,
+and coverage commands still build their required outputs; their internal
+`*:no-build` variants are for the composed gate after `build:all`.
+
+Node test files are expanded by `scripts/run-node-tests.mjs` instead of the
+shell, so the same targets work on Linux, macOS, and Windows. The runner defaults
+to the smaller of the machine's available parallelism and 16, prints the chosen
+value, and accepts an explicit `--test-concurrency` override for diagnostics.
 
 ## GitHub Actions Setup
 
