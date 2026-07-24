@@ -6,11 +6,49 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  captureIsolatedStateCloneSource,
+  createSerialTaskQueue,
   createIsolatedStateClone,
   importPreparedMutationObjects,
   run,
   runBoundedPool,
 } from "../../scripts/prepare-exact-review-batch.mjs";
+
+test("shared Git object mutations run serially and recover after a failed task", async () => {
+  const runSerial = createSerialTaskQueue();
+  let active = 0;
+  let peak = 0;
+  const order = [];
+  const tasks = [0, 1, 2, 3].map((index) =>
+    runSerial(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      order.push(`start-${index}`);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      order.push(`end-${index}`);
+      if (index === 1) throw new Error("expected failure");
+      return index;
+    }),
+  );
+  const results = await Promise.allSettled(tasks);
+
+  assert.equal(peak, 1);
+  assert.deepEqual(order, [
+    "start-0",
+    "end-0",
+    "start-1",
+    "end-1",
+    "start-2",
+    "end-2",
+    "start-3",
+    "end-3",
+  ]);
+  assert.deepEqual(
+    results.map(({ status }) => status),
+    ["fulfilled", "rejected", "fulfilled", "fulfilled"],
+  );
+});
 
 test("bounded preparation never exceeds four workers and preserves manifest order", async () => {
   const completionOrder = [];
@@ -83,6 +121,11 @@ test("parallel preparers use independent shallow state repositories", async (t) 
     "AUTHORIZATION: basic fixture",
   );
   const baselineSha = git(stateRoot, "rev-parse", "HEAD");
+  const cloneSource = await captureIsolatedStateCloneSource(stateRoot);
+  git(stateRoot, "remote", "remove", "origin");
+  git(stateRoot, "config", "--local", "--unset-all", "user.name");
+  git(stateRoot, "config", "--local", "--unset-all", "user.email");
+  git(stateRoot, "config", "--local", "--unset-all", "http.https://github.invalid/.extraheader");
   const left = join(root, "left");
   const right = join(root, "right");
 
@@ -92,12 +135,14 @@ test("parallel preparers use independent shallow state repositories", async (t) 
       destination: left,
       baselineSha,
       timeoutMs: 5_000,
+      source: cloneSource,
     }),
     createIsolatedStateClone({
       stateRoot,
       destination: right,
       baselineSha,
       timeoutMs: 5_000,
+      source: cloneSource,
     }),
   ]);
 
@@ -155,11 +200,13 @@ test("prepared mutation blobs survive isolated worker cleanup", async (t) => {
   git(source, "push", "origin", "state");
   git(root, "clone", "--depth", "1", "--branch", "state", `file://${origin}`, stateRoot);
   const baselineSha = git(stateRoot, "rev-parse", "HEAD");
+  const cloneSource = await captureIsolatedStateCloneSource(stateRoot);
   await createIsolatedStateClone({
     stateRoot,
     destination: worker,
     baselineSha,
     timeoutMs: 5_000,
+    source: cloneSource,
   });
 
   const content = "prepared in an isolated worker\n";

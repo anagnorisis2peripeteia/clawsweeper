@@ -118,6 +118,7 @@ test("state materializer and apply publishers enable model-guided recovery with 
     "${{ steps.state-token.outputs.token }}",
   );
   assert.equal(recoveryPublisher?.env?.CLAWSWEEPER_MODEL_RECOVERY_ENABLED, "0");
+  assert.equal(recoveryPublisher?.env?.CLAWSWEEPER_STATE_APPEND_ENABLED, "1");
   assert.equal(recoveryPublisher?.env?.OPENAI_API_KEY, undefined);
 
   const sweep = byFile.get(".github/workflows/sweep.yml");
@@ -196,6 +197,24 @@ test("trusted generated-state mutation steps receive a step-scoped coordinator c
   );
 });
 
+test("every immutable action-event publisher uses the state append window", () => {
+  const publishers: string[] = [];
+  for (const { file, workflow } of workflows()) {
+    for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+      for (const step of job.steps ?? []) {
+        if (!String(step.run || "").includes("publish-action-event-paths")) continue;
+        publishers.push(`${file}:${jobName}:${step.name}`);
+        assert.equal(
+          step.env?.CLAWSWEEPER_STATE_APPEND_ENABLED ?? job.env?.CLAWSWEEPER_STATE_APPEND_ENABLED,
+          "1",
+          `${file}:${jobName}:${step.name}`,
+        );
+      }
+    }
+  }
+  assert.equal(publishers.length, 7);
+});
+
 test("state compaction remains an explicitly separate main-branch writer", () => {
   const source = readFileSync(join(workflowDirectory, "state-compaction.yml"), "utf8");
   assert.match(source, /repository: openclaw\/clawsweeper-state/);
@@ -203,11 +222,12 @@ test("state compaction remains an explicitly separate main-branch writer", () =>
   assert.doesNotMatch(source, /\.github\/actions\/setup-state/);
 });
 
-test("the rollback scans 50 and grants 8 with bounded parallel preparation", () => {
+test("the rollout scans 50 and grants eight concurrent size-8 preparations", () => {
   const workflow = readFileSync(join(workflowDirectory, "exact-review-batch-publish.yml"), "utf8");
   const worker = readFileSync("dashboard/wrangler.toml", "utf8");
   assert.match(workflow, /EXACT_REVIEW_BATCH_MAX_ITEMS: "50"/);
   assert.match(worker, /EXACT_REVIEW_PUBLICATION_BATCH_SIZE = "8"/);
+  assert.match(worker, /EXACT_REVIEW_PUBLICATION_BATCH_MAX_CONCURRENT = "8"/);
   assert.match(worker, /EXACT_REVIEW_PUBLICATION_BATCH_WAIT_MS = "60000"/);
 });
 

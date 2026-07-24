@@ -33,6 +33,7 @@ import {
   createCachedLabelNumberLookup,
   existingCommandStatusBlocksReplay,
   existingModeStatusBlocksReplay,
+  extractMarkdownSection,
   expiredReviewStartStatusLeases,
   freshExactHeadReviewStartLease,
   hasCommandResponseMarker,
@@ -61,6 +62,7 @@ import {
   reviewOnlyRepairLoopTerminalChecks,
   repairLoopPauseLabels,
   repairLoopStopPauseReason,
+  reviewSummaryFromCommentBody,
   reviewedHeadShaBlockReason,
   renderAutomergeJob,
   renderIssueImplementationJob,
@@ -70,6 +72,7 @@ import {
   staleAutomergeActivationReason,
   staleClosedItemCommandReason,
   shouldClearMaintainerCommandReaction,
+  supersededReviewStartStatusLeases,
   trustedAutomationPredatesReviewStartLease,
   trustedExactHeadReviewCompletionSince,
   trustedCloseBlockReason,
@@ -78,6 +81,61 @@ import {
 import { CLAWSWEEPER_CO_AUTHOR_TRAILER } from "../../dist/repair/co-author-credit.js";
 import { issueSourceRevisionSha256 } from "../../dist/repair/issue-source-guard.js";
 import { parseSimpleYaml, validateJob } from "../../dist/repair/lib.js";
+
+test("review comment section extraction supports headings and stops at metadata", () => {
+  const body = [
+    "# ClawSweeper review",
+    "",
+    "## What this changes",
+    "",
+    "Adds a human-first review summary.",
+    "",
+    "A second paragraph stays with the summary.",
+    "",
+    "## Merge readiness",
+    "",
+    "| **Status** | Needs review |",
+    "",
+    "<details>",
+    "<summary>Agent review details</summary>",
+    "Hidden diagnostics.",
+    "</details>",
+    "",
+    "<!-- clawsweeper-verdict:needs-human sha=abc123 -->",
+  ].join("\n");
+
+  assert.equal(
+    extractMarkdownSection(body, "What this changes"),
+    "Adds a human-first review summary.\n\nA second paragraph stays with the summary.",
+  );
+  assert.equal(
+    extractMarkdownSection("**Summary**\n\nLegacy summary.\n\n**Next step**\n\nWait.", "Summary"),
+    "Legacy summary.",
+  );
+  assert.equal(
+    extractMarkdownSection("Summary:\n\nColon-style summary.\n\nNext step:\nWait.", "Summary"),
+    "Colon-style summary.",
+  );
+  assert.equal(extractMarkdownSection(body, "Missing"), null);
+});
+
+test("review summaries prefer the human-first change summary over legacy summary text", () => {
+  const body = [
+    "**Summary**",
+    "Legacy automation summary.",
+    "",
+    "## What this changes",
+    "",
+    "Plain-language change summary.",
+    "",
+    "## Merge readiness",
+    "",
+    "Ready for review.",
+  ].join("\n");
+
+  assert.equal(reviewSummaryFromCommentBody(body), "Plain-language change summary.");
+  assert.equal(reviewSummaryFromCommentBody("**Summary**\n\nLegacy only."), "Legacy only.");
+});
 
 test("planCommandAckConvergence scopes duplicate cleanup to the current status marker", () => {
   const requestedStatus = "<!-- clawsweeper-command-status:81564:re_review:new -->";
@@ -1645,6 +1703,66 @@ test("expired review start leases select only provably lapsed dedicated lease co
       ...options,
       itemNumber: 25,
       comments: [expiredUuidOwner],
+    }),
+    [],
+  );
+});
+
+test("superseded review start leases select only trusted dedicated comments for older heads", () => {
+  const itemNumber = 24;
+  const currentHead = "b".repeat(40);
+  const oldHead = "a".repeat(40);
+  const leaseComment = (id, headSha, overrides = {}) => ({
+    id,
+    user: { login: overrides.login ?? "clawsweeper[bot]" },
+    body: [
+      "ClawSweeper status: review started.",
+      `<!-- clawsweeper-review-status:started item=${itemNumber} sha=${headSha} started_at=2026-07-21T05:00:00.000Z lease_expires_at=2026-07-21T06:00:00.000Z owner=run-${id} v=${overrides.version ?? "1"} -->`,
+      overrides.identityMarker ?? `<!-- clawsweeper-review-lease item=${itemNumber} -->`,
+    ].join("\n"),
+  });
+
+  assert.deepEqual(
+    supersededReviewStartStatusLeases({
+      comments: [
+        leaseComment(101, oldHead),
+        leaseComment(102, currentHead),
+        leaseComment(103, oldHead, { login: "contributor" }),
+        leaseComment(104, oldHead, { version: "2" }),
+        leaseComment(105, oldHead, {
+          identityMarker: `<!-- clawsweeper-review item=${itemNumber} -->`,
+        }),
+      ],
+      itemNumber,
+      headSha: currentHead,
+      authoritativeHeadSha: currentHead,
+      trustedAuthors: new Set(["clawsweeper[bot]"]),
+    }),
+    [{ commentId: 101, headSha: oldHead }],
+  );
+});
+
+test("stale review A cannot classify newer-head lease B as superseded", () => {
+  const itemNumber = 24;
+  const staleHead = "a".repeat(40);
+  const authoritativeHead = "b".repeat(40);
+  const newerLease = {
+    id: 202,
+    user: { login: "clawsweeper[bot]" },
+    body: [
+      "ClawSweeper status: review started.",
+      `<!-- clawsweeper-review-status:started item=${itemNumber} sha=${authoritativeHead} started_at=2026-07-21T05:01:00.000Z lease_expires_at=2026-07-21T06:01:00.000Z owner=worker-b v=1 -->`,
+      `<!-- clawsweeper-review-lease item=${itemNumber} -->`,
+    ].join("\n"),
+  };
+
+  assert.deepEqual(
+    supersededReviewStartStatusLeases({
+      comments: [newerLease],
+      itemNumber,
+      headSha: staleHead,
+      authoritativeHeadSha: authoritativeHead,
+      trustedAuthors: new Set(["clawsweeper[bot]"]),
     }),
     [],
   );

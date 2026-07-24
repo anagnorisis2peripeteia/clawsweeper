@@ -51,17 +51,36 @@ export async function runBoundedPool(items, concurrency, worker) {
   return { results, peak };
 }
 
-export async function createIsolatedStateClone({ stateRoot, destination, baselineSha, timeoutMs }) {
+export function createSerialTaskQueue() {
+  let tail = Promise.resolve();
+  return (task) => {
+    const current = tail.then(task);
+    tail = current.catch(() => {});
+    return current;
+  };
+}
+
+export async function captureIsolatedStateCloneSource(stateRoot) {
   const remoteUrl = (await capture("git", ["-C", stateRoot, "remote", "get-url", "origin"])).trim();
   if (!remoteUrl) throw new Error("state origin URL is required");
+  const config = await capture("git", ["-C", stateRoot, "config", "--local", "--null", "--list"]);
+  return { remoteUrl, configEntries: workerGitConfigEntries(config) };
+}
+
+export async function createIsolatedStateClone({
+  stateRoot,
+  destination,
+  baselineSha,
+  timeoutMs,
+  source,
+}) {
   await runChecked("git", ["clone", "--shared", "--no-checkout", stateRoot, destination], {
     timeoutMs,
   });
-  await runChecked("git", ["-C", destination, "remote", "set-url", "origin", remoteUrl], {
+  await runChecked("git", ["-C", destination, "remote", "set-url", "origin", source.remoteUrl], {
     timeoutMs,
   });
-  const config = await capture("git", ["-C", stateRoot, "config", "--local", "--null", "--list"]);
-  for (const entry of workerGitConfigEntries(config)) {
+  for (const entry of source.configEntries) {
     await runChecked(
       "git",
       ["-C", destination, "config", "--local", "--add", entry.key, entry.value],
@@ -184,6 +203,9 @@ async function controller() {
   const deadline = startedAt + totalTimeoutMs;
   const stateRoot = resolve(env("CLAWSWEEPER_STATE_DIR"));
   const baselineSha = (await capture("git", ["-C", stateRoot, "rev-parse", "HEAD"])).trim();
+  // The source remote and auth config are process-stable for the batch. Capture
+  // them once so worker fanout never races repeated reads of the shared clone.
+  const cloneSource = await captureIsolatedStateCloneSource(stateRoot);
   const workersRoot = resolve(workspace, ".artifacts/exact-review-batch/workers");
   const heartbeatFailurePath = resolve(
     workspace,
@@ -196,6 +218,9 @@ async function controller() {
   const durations = [];
   let timeouts = 0;
   let admitted = 0;
+  // Worker preparation is parallel, but every imported object lands in the
+  // same state repository. Keep that shared Git mutation boundary serial.
+  const importObjects = createSerialTaskQueue();
 
   const { peak } = await runBoundedPool(items, concurrency, async (item, index) => {
     const outcomePath = checkedOutcomePath(workspace, item.outcomePath);
@@ -216,13 +241,16 @@ async function controller() {
     const workerStartedAt = Date.now();
     const itemDeadline = Math.min(deadline, workerStartedAt + itemTimeoutMs);
     let timedOut = false;
+    let failureStage = "isolated state clone";
     try {
       await createIsolatedStateClone({
         stateRoot,
         destination: stateClone,
         baselineSha,
         timeoutMs: remainingTimeout(deadline),
+        source: cloneSource,
       });
+      failureStage = "worker execution";
       const status = await run(
         process.execPath,
         [process.argv[1], "worker", itemPath, root, stateClone, workspace],
@@ -231,13 +259,16 @@ async function controller() {
       timedOut = status.timedOut;
       if (timedOut) timeouts += 1;
       if (existsSync(outcomePath)) {
+        failureStage = "prepared object import";
         try {
-          await importPreparedMutationObjects({
-            stateRoot,
-            stateClone,
-            outcomePath,
-            timeoutMs: importTimeout(itemDeadline),
-          });
+          await importObjects(() =>
+            importPreparedMutationObjects({
+              stateRoot,
+              stateClone,
+              outcomePath,
+              timeoutMs: importTimeout(itemDeadline),
+            }),
+          );
         } catch (error) {
           writeFailure(outcomePath, "retryable_failure", "unknown_failure");
           console.error(
@@ -252,6 +283,7 @@ async function controller() {
       if (!existsSync(outcomePath)) {
         writeFailure(outcomePath, "retryable_failure", "unknown_failure");
       }
+      console.error(`Failed to prepare batch member ${item.itemKey} during ${failureStage}`);
     } finally {
       durations.push(Date.now() - workerStartedAt);
       try {
@@ -372,9 +404,10 @@ async function worker(itemPath, root, stateClone, workspace) {
   if (existsSync(report)) cpSync(report, join(eventArtifacts, `${itemNumber}.md`));
 
   result = await run(process.execPath, [join(workspace, "dist/repair/publish-event-result.js")], {
-    cwd: workspace,
+    cwd: root,
     env: {
       ...process.env,
+      CLAWSWEEPER_CODE_ROOT: workspace,
       CLAWSWEEPER_STATE_DIR: stateClone,
       EXACT_REVIEW_WORK_ROOT: root,
       TARGET_REPO: targetRepo,

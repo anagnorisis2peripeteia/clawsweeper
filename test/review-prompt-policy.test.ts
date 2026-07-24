@@ -524,7 +524,7 @@ Reason: Maintainers should review the proof before merge.
     "none",
   );
 
-  assert.match(comment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(comment, /### Mantis proof suggestion/);
   assert.match(comment, /posting this exact PR comment/);
   assert.match(comment, /```text\n@openclaw-mantis telegram desktop proof:/);
 });
@@ -568,7 +568,7 @@ Reason: Maintainers should review the proof before merge.
 	`,
     "none",
   );
-  assert.match(discordComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(discordComment, /### Mantis proof suggestion/);
   assert.match(discordComment, /@openclaw-mantis discord status reactions proof:/);
 
   const webUiChatComment = renderReviewCommentFromReport(
@@ -609,7 +609,7 @@ Reason: Maintainers should review the proof before merge.
 	`,
     "none",
   );
-  assert.match(webUiChatComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(webUiChatComment, /### Mantis proof suggestion/);
   assert.match(webUiChatComment, /@openclaw-mantis web UI chat proof:/);
 });
 
@@ -653,9 +653,9 @@ Reason: Maintainers should review the proof before merge.
     "none",
   );
 
-  assert.doesNotMatch(comment, /\*\*Mantis proof suggestion\*\*/);
+  assert.doesNotMatch(comment, /### Mantis proof suggestion/);
   assert.doesNotMatch(comment, /@openclaw-mantis visual task/);
-  assert.match(comment, /\*\*Proof path suggestion\*\*/);
+  assert.match(comment, /### Proof path suggestion/);
   assert.match(comment, /Mantis is currently scoped to Telegram, Discord, and web UI chat proof/);
   assert.match(comment, /browser or Playwright proof/);
 });
@@ -700,8 +700,8 @@ Reason: Maintainers should review the proof before merge.
     "none",
   );
 
-  assert.doesNotMatch(comment, /\*\*Mantis proof suggestion\*\*/);
-  assert.doesNotMatch(comment, /\*\*Proof path suggestion\*\*/);
+  assert.doesNotMatch(comment, /### Mantis proof suggestion/);
+  assert.doesNotMatch(comment, /### Proof path suggestion/);
   assert.doesNotMatch(comment, /@openclaw-mantis/);
 });
 
@@ -745,9 +745,9 @@ Reason: Maintainers should review the proof before merge.
     "none",
   );
 
-  assert.doesNotMatch(mutationComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.doesNotMatch(mutationComment, /### Mantis proof suggestion/);
   assert.doesNotMatch(mutationComment, /@openclaw-mantis fix this PR/);
-  assert.match(mutationComment, /\*\*Proof path suggestion\*\*/);
+  assert.match(mutationComment, /### Proof path suggestion/);
   assert.match(mutationComment, /Mantis is proof-only/);
   assert.match(mutationComment, /ClawSweeper's repair, apply, or automerge lanes/);
 
@@ -790,9 +790,9 @@ Reason: Maintainers should review the proof before merge.
     "none",
   );
 
-  assert.match(proofComment, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(proofComment, /### Mantis proof suggestion/);
   assert.match(proofComment, /verify the fix in Telegram Desktop/);
-  assert.doesNotMatch(proofComment, /\*\*Proof path suggestion\*\*/);
+  assert.doesNotMatch(proofComment, /### Proof path suggestion/);
 });
 
 test("pull request review comments reject GitHub metadata mutations without blocking chat interaction proof", () => {
@@ -853,7 +853,7 @@ Reason: Maintainers should review the proof before merge.
 	`,
       "none",
     );
-    assert.doesNotMatch(comment, /\*\*Mantis proof suggestion\*\*/);
+    assert.doesNotMatch(comment, /### Mantis proof suggestion/);
     assert.doesNotMatch(
       comment,
       new RegExp(maintainerComment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
@@ -899,7 +899,7 @@ Reason: Maintainers should review the proof before merge.
 	`,
     "none",
   );
-  assert.match(interactionProof, /\*\*Mantis proof suggestion\*\*/);
+  assert.match(interactionProof, /### Mantis proof suggestion/);
   assert.match(interactionProof, /edit a Discord message/);
 });
 
