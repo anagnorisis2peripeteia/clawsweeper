@@ -3,11 +3,16 @@ import fs from "node:fs";
 import path from "node:path";
 import { parseArgs, repoRoot } from "./lib.js";
 import type { JsonValue, LooseRecord } from "./json-types.js";
-import { ghJsonWithRetry as ghJson, ghPagedLimitWithRetry as ghPagedLimit } from "./github-cli.js";
+import {
+  ghJsonWithRetry as ghJson,
+  ghPagedLimitWithRetry as ghPagedLimit,
+  ghStdoutFromError,
+} from "./github-cli.js";
 import { assertRepo, commaSet, positiveInteger } from "./comment-router-utils.js";
 import {
   buildSpamModelInput,
   commentVersionKey,
+  graphqlNodesToleratingNotFound,
   normalizeModelResults,
   normalizeSpamComment,
   prioritizeSpamScanComments,
@@ -70,7 +75,7 @@ let modelError: string | null = null;
 let modelResults = new Map<string, SpamModelResult>();
 if (candidates.length > 0) {
   try {
-    modelResults = await scanWithCheapModel(candidates, model);
+    modelResults = await scanWithModel(candidates, model);
   } catch (error) {
     modelError = compactText(error instanceof Error ? error.message : String(error), 500);
     console.warn(
@@ -190,17 +195,9 @@ function hydrateMinimization(comments: SpamScanComment[]) {
         ... on PullRequestReviewComment { id isMinimized minimizedReason }
       }
     }`;
-    const response = ghJson<LooseRecord>([
-      "api",
-      "graphql",
-      "-f",
-      `query=${query}`,
-      ...batch.flatMap((id) => ["-F", `ids[]=${id}`]),
-    ]);
+    const response = fetchMinimizationBatch(query, batch);
     const byId = new Map(
-      ((response.data as LooseRecord | undefined)?.nodes as LooseRecord[] | undefined)
-        ?.filter(Boolean)
-        .map((node) => [String(node.id ?? ""), node]) ?? [],
+      graphqlNodesToleratingNotFound(response).map((node) => [String(node.id ?? ""), node]),
     );
     for (const comment of comments) {
       const node = comment.node_id ? byId.get(comment.node_id) : null;
@@ -210,7 +207,31 @@ function hydrateMinimization(comments: SpamScanComment[]) {
   }
 }
 
-async function scanWithCheapModel(comments: SpamScanComment[], scanModel: string) {
+// gh exits non-zero on partial GraphQL errors (e.g. NOT_FOUND for comments deleted between
+// listing and this batch query) even though stdout still carries the full data payload.
+// Recover that payload; graphqlNodesToleratingNotFound decides whether the errors are fatal.
+function fetchMinimizationBatch(query: string, ids: string[]): LooseRecord {
+  const ghArgs = [
+    "api",
+    "graphql",
+    "-f",
+    `query=${query}`,
+    ...ids.flatMap((id) => ["-F", `ids[]=${id}`]),
+  ];
+  try {
+    return ghJson<LooseRecord>(ghArgs);
+  } catch (error) {
+    const stdout = ghStdoutFromError(error);
+    if (!stdout) throw error;
+    try {
+      return JSON.parse(stdout) as LooseRecord;
+    } catch {
+      throw error;
+    }
+  }
+}
+
+async function scanWithModel(comments: SpamScanComment[], scanModel: string) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     console.warn("[spam-scanner] OPENAI_API_KEY missing; writing deterministic audit only.");
@@ -218,6 +239,7 @@ async function scanWithCheapModel(comments: SpamScanComment[], scanModel: string
   }
   const payload = {
     model: internalCodexModel(scanModel),
+    reasoning: { effort: "high" },
     input: [
       {
         role: "system",

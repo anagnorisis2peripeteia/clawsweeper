@@ -242,7 +242,11 @@ function selectCandidates() {
       }
       return {
         ...record,
-        mode: requestedMode ?? record.mode ?? job.frontmatter.mode,
+        mode:
+          requestedMode ??
+          (["plan", "execute", "autonomous"].includes(String(record.effective_mode ?? ""))
+            ? String(record.effective_mode)
+            : "plan"),
       };
     })
     .filter(Boolean)

@@ -58,6 +58,14 @@ env:
   CLAWSWEEPER_FIX_TIMEOUT_RESERVE_MS: ${{ vars.CLAWSWEEPER_FIX_TIMEOUT_RESERVE_MS || '300000' }}
   CLAWSWEEPER_FIX_PREFLIGHT_TIMEOUT_MS: ${{ vars.CLAWSWEEPER_FIX_PREFLIGHT_TIMEOUT_MS || '120000' }}
   CLAWSWEEPER_MODEL: internal
+  CLAWSWEEPER_RUNNER: ${{ vars.CLAWSWEEPER_RUNNER || 'codex' }}
+  CLAWSWEEPER_OPENCLAW_MODEL: ${{ secrets.CLAWSWEEPER_OPENCLAW_MODEL }}
+  CLAWSWEEPER_OPENCLAW_PROVIDERS_JSON: ${{ secrets.CLAWSWEEPER_OPENCLAW_PROVIDERS_JSON }}
+  CLAWSWEEPER_OPENCLAW_OPENAI_KEY: ${{ vars.CLAWSWEEPER_RUNNER == 'openclaw' && secrets.OPENAI_API_KEY || '' }}
+  ANTHROPIC_API_KEY: ${{ vars.CLAWSWEEPER_RUNNER == 'openclaw' && secrets.ANTHROPIC_API_KEY || '' }}
+  GEMINI_API_KEY: ${{ vars.CLAWSWEEPER_RUNNER == 'openclaw' && secrets.GEMINI_API_KEY || '' }}
+  KIMI_API_KEY: ${{ vars.CLAWSWEEPER_RUNNER == 'openclaw' && secrets.KIMI_API_KEY || '' }}
+  OPENROUTER_API_KEY: ${{ vars.CLAWSWEEPER_RUNNER == 'openclaw' && secrets.OPENROUTER_API_KEY || '' }}
   CLAWSWEEPER_TARGET_VALIDATION_MODE: ${{ vars.CLAWSWEEPER_TARGET_VALIDATION_MODE || 'changed-only' }}
   CLAWSWEEPER_RESOLVE_REVIEW_THREADS: ${{ vars.CLAWSWEEPER_RESOLVE_REVIEW_THREADS || '1' }}
   CLAWSWEEPER_MAX_ACTIVE_PRS_PER_AREA: ${{ vars.CLAWSWEEPER_MAX_ACTIVE_PRS_PER_AREA || '50' }}
@@ -85,7 +93,7 @@ jobs:
     runs-on: ${{ github.event.inputs.runner || vars.CLAWSWEEPER_COMMIT_FINDING_RUNNER || 'blacksmith-16vcpu-ubuntu-2404' }}
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           filter: blob:none
           fetch-depth: 0
@@ -96,11 +104,11 @@ jobs:
 
       - name: Create GitHub App token
         id: app_token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           client-id: ${{ env.CLAWSWEEPER_APP_CLIENT_ID }}
           private-key: ${{ secrets.CLAWSWEEPER_APP_PRIVATE_KEY }}
-          owner: ${{ vars.CLAWSWEEPER_ALLOWED_OWNER || github.repository_owner }}
+          owner: ${{ github.repository_owner }}
           permission-contents: write
           permission-issues: write
           permission-pull-requests: write
@@ -116,6 +124,8 @@ jobs:
 
       - uses: ./.github/actions/setup-state
         with:
+          coordinator-enabled: ${{ vars.CLAWSWEEPER_STATE_COORDINATOR_ENABLED || 'false' }}
+          coordinator-url: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
           token: ${{ steps.state-token.outputs.token }}
           fetch-depth: 1
 
@@ -147,12 +157,15 @@ jobs:
           pnpm run repair:commit-finding-intake -- "${args[@]}"
 
       - uses: ./.github/actions/setup-codex
-        if: ${{ steps.prepare.outputs.should_repair == 'true' }}
+        if: ${{ env.CLAWSWEEPER_RUNNER != 'openclaw' && steps.prepare.outputs.should_repair == 'true' }}
         with:
           cache-suffix: target-pnpm
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           CLAWSWEEPER_INTERNAL_MODEL: ${{ secrets.CLAWSWEEPER_MODEL }}
+
+      - uses: ./.github/actions/setup-openclaw
+        if: ${{ steps.prepare.outputs.should_repair == 'true' }}
 
       - name: Review synthetic result
         if: ${{ steps.prepare.outputs.should_repair == 'true' }}
@@ -198,6 +211,8 @@ jobs:
 
       - name: Commit intake ledger
         if: always()
+        env:
+          CLAWSWEEPER_WEBHOOK_SECRET: ${{ secrets.CLAWSWEEPER_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
           pnpm run repair:publish-main -- \

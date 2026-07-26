@@ -7,6 +7,31 @@ import test from "node:test";
 
 const repoRoot = process.cwd();
 
+test("repair output schema keeps every strict object property required", () => {
+  const schema = JSON.parse(
+    fs.readFileSync(path.join(repoRoot, "schema/repair/codex-result.schema.json"), "utf8"),
+  );
+
+  const visit = (value: unknown, location: string): void => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const node = value as Record<string, unknown>;
+    if (node.type === "object" && node.additionalProperties === false) {
+      const properties = Object.keys((node.properties ?? {}) as Record<string, unknown>).sort();
+      const required = Array.isArray(node.required) ? node.required.map(String).sort() : [];
+      assert.deepEqual(required, properties, `${location} must require every declared property`);
+    }
+    for (const [key, child] of Object.entries(node)) {
+      if (Array.isArray(child)) {
+        child.forEach((entry, index) => visit(entry, `${location}.${key}[${index}]`));
+      } else {
+        visit(child, `${location}.${key}`);
+      }
+    }
+  };
+
+  visit(schema, "schema");
+});
+
 test("run-worker starts Codex in the target checkout when one is available", () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "clawsweeper-run-worker-"));
   const fakeBin = path.join(tmp, "bin");
@@ -106,15 +131,33 @@ test("run-worker starts Codex in the target checkout when one is available", () 
     });
 
     assert.equal(fs.readFileSync(cwdFile, "utf8"), fs.realpathSync(targetCheckout));
-    const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
-    assert.equal(args[args.indexOf("--cd") + 1], targetCheckout);
-    assert.equal(args[args.indexOf("--sandbox") + 1], "danger-full-access");
-    assert.equal(args.includes("--model"), false);
-    assert.equal(args.includes("secret-model-for-test"), false);
     const runDirs = fs.globSync(path.join(repoRoot, `.clawsweeper-repair/runs/${jobName}-plan-*`));
     assert.equal(runDirs.length, 1);
     const runDir = runDirs[0];
     assert.ok(runDir);
+    const args = JSON.parse(fs.readFileSync(argsFile, "utf8"));
+    assert.deepEqual(args, [
+      "exec",
+      "--cd",
+      targetCheckout,
+      "--sandbox",
+      "danger-full-access",
+      "-c",
+      'approval_policy="never"',
+      "-c",
+      'forced_login_method="api"',
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'service_tier="fast"',
+      "--output-schema",
+      path.join(repoRoot, "schema/repair/codex-result.schema.json"),
+      "--output-last-message",
+      path.join(runDir, "result.json"),
+      "--json",
+      "-",
+    ]);
+    assert.equal(args.includes("secret-model-for-test"), false);
     assert.ok(fs.statSync(path.join(runDir, "codex.jsonl")).size > 2 * 1024 * 1024);
     assert.equal(fs.statSync(path.join(runDir, "codex.stderr.log")).size, 2 * 1024 * 1024);
   } finally {

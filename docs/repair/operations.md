@@ -239,6 +239,31 @@ Use Blacksmith labels only when you intentionally want a non-parity hosted runne
 pnpm run repair:dispatch -- jobs/openclaw/cluster-*.md --mode plan --runner blacksmith-4vcpu-ubuntu-2404
 ```
 
+## Choosing the agent runner
+
+ClawSweeper uses Codex by default. Set `CLAWSWEEPER_RUNNER=openclaw` to run the
+agent lanes through the released OpenClaw CLI instead, and set the required
+`CLAWSWEEPER_OPENCLAW_MODEL` to a `provider/model` reference such as
+`openai/gpt-5.6-sol`. `CLAWSWEEPER_OPENCLAW_BIN` may override the executable;
+otherwise ClawSweeper runs `openclaw` from `PATH`.
+
+Providers that are not bundled with OpenClaw can be supplied through
+`CLAWSWEEPER_OPENCLAW_PROVIDERS_JSON`, a JSON object merged into
+`models.providers`; referenced provider API-key environment variables must also
+be present. Three providers ship as built-in defaults and need only their API key
+in the environment: `kimi/…` (Kimi Code endpoint, `KIMI_API_KEY`; models
+`kimi-for-coding` and `k3`), `cerebras/…` (Cerebras Code plans,
+`CEREBRAS_API_KEY`; model `zai-glm-4.7` until Cerebras retires it on
+2026-08-17), and `zai/…` (Z.AI GLM Coding Plan endpoint, `ZAI_API_KEY`;
+model `glm-5.2` — plan keys only work on the coding endpoint). The subprocess environment is deny-by-default: only the base OS
+surface, `OPENCLAW_*` controls, proxy settings, and known provider API keys
+reach the agent. ClawSweeper gives OpenClaw a fresh state directory, a coding tool
+profile limited to the target workspace, and the lane's existing timeout and
+reasoning effort. OpenClaw can exit zero for terminal agent failures, so the
+wrapper inspects its JSON envelope for agent errors, aborts, timeouts, exhausted
+fallbacks, and error payloads and converts them into ordinary non-zero process
+failures before existing retry logic sees the result.
+
 The workflow uses Node 24 and starts a local Codex Responses proxy from
 `OPENAI_API_KEY` inside an isolated per-run `CODEX_HOME`. Codex subprocesses use
 that proxy config and run without raw OpenAI or Codex API key environment
@@ -248,13 +273,13 @@ local `setup-codex` action's `auth-mode: login` input.
 Codex runs in a read-only sandbox for classification and receives no GitHub token. GitHub read access is scoped to deterministic preflight scripts. For reviewed fix artifacts, `execute-fix-artifact` gives Codex a temporary target checkout without GitHub credentials, then the deterministic executor commits, pushes, opens the replacement PR, and closes uneditable source PRs only after the replacement exists. When a replacement carries contributor work forward, non-bot source PR authors are added as `Co-authored-by` trailers and named in the replacement PR body and source close comment. Remaining write access is scoped to `apply-result`.
 
 The repair worker wrapper emits a heartbeat while Codex is running. Execute-side
-edit, review, final rebase, and write-preflight subprocesses emit the same
+edit, review, and final rebase subprocesses emit the same
 heartbeat. If a model call is slow, Actions logs should show
 `[clawsweeper repair] ... still running` about once a minute instead of ending
 with a silent no-output timeout.
 
 Automerge repair execution also updates the existing mutable automerge status
-comment at coarse milestones: validation plan, write preflight, Codex edit
+comment at coarse milestones: validation plan, Codex edit
 passes, validation/review loops, final base sync, and the post-repair automerge
 wait. These updates append or replace rows in the single progress timeline
 instead of adding new comments.
@@ -286,6 +311,8 @@ empty diff after rebase.
 Runs for the same job path and mode share a concurrency group. Different cluster jobs can still run in parallel.
 
 Live preflight hydrates job-provided refs by default and records linked refs without expanding them. Set repo variables `CLAWSWEEPER_MAX_LINKED_REFS` above `0` only for small clusters that need first-hop context and `CLAWSWEEPER_HYDRATE_COMMENTS=1` when comment bodies are necessary evidence; normal scale runs use issue/PR metadata, body excerpts, PR files, and PR checks.
+
+Exact-review producers normally deliver GitHub effects and submit prepared state mutations directly to the dashboard Worker. The legacy exact-review batch publisher remains enabled only to drain already-enqueued and direct-publication fallback items; it is scheduled for removal after that queue stays empty through the migration window.
 
 ## Maintainer Comment Routing
 

@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { mockGhBinEnv } from "../helpers.ts";
+
 const repoRoot = process.cwd();
 
 test("issue implementation post-flight waits for green PR checks without merging", () => {
@@ -142,7 +144,7 @@ test("issue implementation post-flight waits for green PR checks without merging
         ...process.env,
         CLAWSWEEPER_ALLOW_EXECUTE: "1",
         CLAWSWEEPER_ALLOWED_OWNER: "openclaw",
-        PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -229,7 +231,7 @@ test("issue implementation post-flight waits for checks to be created", () => {
         CLAWSWEEPER_POST_FLIGHT_WAIT_MS: "10000",
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -320,7 +322,7 @@ test("merge post-flight waits when only ignored checks exist", () => {
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_MERGED_FILE: mergeFlagPath,
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });
@@ -328,10 +330,28 @@ test("merge post-flight waits when only ignored checks exist", () => {
     const report = JSON.parse(fs.readFileSync(reportPath, "utf8"));
     assert.equal(report.actions[0]?.status, "executed");
     assert.equal(report.actions[0]?.merge_commit_sha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    assert.deepEqual(report.closure_authorization, {
+      version: 1,
+      status: "authorized",
+      merged_fixes: [
+        {
+          fix_ref: "#123",
+          merge_commit_sha: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        },
+      ],
+    });
     assert.equal(fs.readFileSync(viewCountPath, "utf8"), "2");
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("post-flight records authorization and never closes related items directly", () => {
+  const source = fs.readFileSync("src/repair/post-flight.ts", "utf8");
+
+  assert.match(source, /closure_authorization = buildClosureAuthorization/);
+  assert.doesNotMatch(source, /finalizePostMergeCloseout/);
+  assert.doesNotMatch(source, /postMergeCloseoutComment/);
 });
 
 test("post-flight keeps no-timestamp pending duplicate checks visible", () => {
@@ -396,7 +416,7 @@ test("post-flight keeps no-timestamp pending duplicate checks visible", () => {
         CLAWSWEEPER_POST_FLIGHT_WAIT_MS: "10000",
         CLAWSWEEPER_POST_FLIGHT_POLL_MS: "1",
         FAKE_GH_VIEW_COUNT_FILE: viewCountPath,
-        PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ""}`,
+        ...mockGhBinEnv(path.join(fakeBin, "gh"), fakeBin),
       },
       stdio: "pipe",
     });

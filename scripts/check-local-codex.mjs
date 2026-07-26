@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 
-const model = argValue("--model") ?? process.env.CLAWSWEEPER_LOCAL_CODEX_MODEL ?? "gpt-5.5";
+const model = argValue("--model") ?? process.env.CLAWSWEEPER_LOCAL_CODEX_MODEL ?? "gpt-5.6-sol";
 const { codexSpawnInvocation } = await loadCodexLauncher();
-const codexEnv = { ...process.env, CLAWSWEEPER_PREFER_WINDOWS_CODEX_APP: "1" };
+const codexEnv = { ...process.env };
 const codex = codexInvocation([]);
 
 console.log(`Codex binary: ${codex.command}${codex.args.length ? ` ${codex.args.join(" ")}` : ""}`);
@@ -29,6 +29,8 @@ const smoke = runCodex(
     model,
     "-c",
     'service_tier="fast"',
+    "-c",
+    'model_reasoning_effort="high"',
     "-c",
     'approval_policy="never"',
     "--sandbox",

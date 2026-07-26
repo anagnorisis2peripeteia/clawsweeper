@@ -4,7 +4,14 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { parseArgs, parseJob, repoRoot, validateJob } from "./lib.js";
+import {
+  allowedRepairOwners,
+  isAllowedRepairOwner,
+  parseArgs,
+  parseJob,
+  repoRoot,
+  validateJob,
+} from "./lib.js";
 import { ghErrorText, ghJsonWithRetry } from "./github-cli.js";
 import {
   issueImplementationJobBranch,
@@ -18,6 +25,11 @@ import {
 } from "./comment-router-core.js";
 import { issueSourceRevisionSha256 } from "./issue-source-guard.js";
 import { hasSecuritySignal } from "./security-signals.js";
+import {
+  CLOSE_PROTECTED_LABEL_NAMES,
+  HUMAN_REVIEW_LABEL,
+  MANUAL_ONLY_LABEL,
+} from "./exact-review-guard-labels.js";
 
 type CandidateKind = "strict_bug" | "vision_fit" | "viable";
 
@@ -261,6 +273,7 @@ export function reportOnlyDecision({
   operatorOverride = false,
   itemNumber = Number(report.frontmatter.number),
   live = null,
+  allowedOwner,
 }: {
   targetRepo: string;
   report: ReviewReport;
@@ -269,6 +282,7 @@ export function reportOnlyDecision({
   operatorOverride?: boolean;
   itemNumber?: number;
   live?: LooseRecord | null;
+  allowedOwner?: string;
 }): IntakeDecision {
   return eligibilityDecision({
     targetRepo,
@@ -279,6 +293,7 @@ export function reportOnlyDecision({
     candidateKind,
     operatorOverride,
     itemNumber,
+    ...(allowedOwner === undefined ? {} : { allowedOwner }),
   });
 }
 
@@ -322,6 +337,7 @@ function eligibilityDecision({
   reportMarkdown,
   live,
   operatorOverride = false,
+  allowedOwner = process.env.CLAWSWEEPER_ALLOWED_OWNER,
 }: {
   enabled: string;
   targetRepo: string;
@@ -331,9 +347,20 @@ function eligibilityDecision({
   reportMarkdown: string;
   live: LooseRecord | null;
   operatorOverride?: boolean;
+  allowedOwner?: string;
 }): IntakeDecision {
   if (!truthy(enabled)) {
     return decision("disabled", false, "issue implementation intake disabled");
+  }
+  // The execution gates (assertAllowedOwner, CrabFleet registration) enforce
+  // the same owner policy; rejecting here keeps durable state free of repair
+  // jobs that could never pass their first gate (#604).
+  if (!isAllowedRepairOwner(targetRepo, allowedOwner)) {
+    return decision(
+      "owner_policy_blocked",
+      false,
+      `unsupported target repo owner ${targetRepo.split("/")[0]}; repair owner policy allows ${allowedRepairOwners(allowedOwner).join(", ")}`,
+    );
   }
   const normalizedTargetRepo = targetRepo.trim().toLowerCase();
   if (
@@ -955,15 +982,14 @@ function writeStepOutputs(values: Record<string, JsonValue>) {
   fs.appendFileSync(output, `${lines.join("\n")}\n`);
 }
 
+const ISSUE_IMPLEMENTATION_PROTECTED_LABELS = new Set<string>([
+  ...CLOSE_PROTECTED_LABEL_NAMES,
+  HUMAN_REVIEW_LABEL,
+  MANUAL_ONLY_LABEL,
+]);
+
 function isProtectedLabel(label: string): boolean {
-  return [
-    "security",
-    "beta-blocker",
-    "release-blocker",
-    "maintainer",
-    "clawsweeper:human-review",
-    "clawsweeper:manual-only",
-  ].includes(label.trim().toLowerCase());
+  return ISSUE_IMPLEMENTATION_PROTECTED_LABELS.has(label.trim().toLowerCase());
 }
 
 function isAutomaticImplementationPauseLabel(label: string): boolean {

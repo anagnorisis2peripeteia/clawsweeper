@@ -1,14 +1,16 @@
 import crypto from "node:crypto";
 
 import type { JsonValue, LooseRecord } from "./json-types.js";
+import {
+  CLOSE_PROTECTED_LABEL_NAMES,
+  HUMAN_REVIEW_LABEL,
+  MANUAL_ONLY_LABEL,
+} from "./exact-review-guard-labels.js";
 
-const PROTECTED_LABELS = new Set([
-  "security",
-  "beta-blocker",
-  "release-blocker",
-  "maintainer",
-  "clawsweeper:human-review",
-  "clawsweeper:manual-only",
+const PROTECTED_LABELS = new Set<string>([
+  ...CLOSE_PROTECTED_LABEL_NAMES,
+  HUMAN_REVIEW_LABEL,
+  MANUAL_ONLY_LABEL,
 ]);
 const CLAWSWEEPER_BOTS = new Set([
   "clawsweeper",
@@ -99,7 +101,9 @@ function isClawSweeperAdvisoryLabel(label: string): boolean {
   return (
     /^(?:status|rating|proof|merge-risk|impact|issue-rating):/.test(label) ||
     /^p[0-3]$/.test(label) ||
+    label === "maturity:stable" ||
     label === "feature: ✨ showcase" ||
+    label === "good first issue" ||
     label === "mantis: telegram-visible-proof" ||
     label === "triage: needs-real-behavior-proof"
   );

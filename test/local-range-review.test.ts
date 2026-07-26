@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { buildLocalRangeReviewForTest } from "../dist/clawsweeper.js";
@@ -29,7 +38,8 @@ test("buildLocalRangeReview synthesizes a PR item + offline diff from the local 
   try {
     writeFileSync(join(dir, "keep.txt"), "base\n");
     git(dir, "add", "keep.txt");
-    git(dir, "commit", "-q", "-m", "init");
+
+    git(dir, "commit", "-q", "--author", "Range Tester <test@example.com>", "-m", "init");
     // a ref at the base commit, so HEAD is one commit ahead of it
     git(dir, "branch", "base-ref");
 
@@ -38,7 +48,16 @@ test("buildLocalRangeReview synthesizes a PR item + offline diff from the local 
     writeFileSync(join(dir, "feature.txt"), "hello world\n");
     writeFileSync(join(dir, "keep.txt"), "base\nmore\n");
     git(dir, "add", "feature.txt", "keep.txt");
-    git(dir, "commit", "-q", "-m", "feat: add a feature\n\nthis is the body line");
+
+    git(
+      dir,
+      "commit",
+      "-q",
+      "--author",
+      "Range Tester <test@example.com>",
+      "-m",
+      "feat: add a feature\n\nthis is the body line",
+    );
 
     const headSha = git(dir, "rev-parse", "HEAD");
     const committedAt = git(dir, "log", "-1", "--format=%cI", "HEAD");
@@ -84,7 +103,32 @@ test("buildLocalRangeReview synthesizes a PR item + offline diff from the local 
     assert.equal(byName("keep.txt")?.status, "M");
     assert.match(byName("keep.txt")?.patch ?? "", /\+more/);
 
-    assert.deepEqual(result.context.counts, { comments: 0, timeline: 0, pullFiles: 2 });
+    const semanticFiles = result.context.semanticPullFiles as Array<Record<string, unknown>>;
+    const semanticByName = (name: string) => semanticFiles.find((file) => file.filename === name);
+    assert.deepEqual(
+      {
+        baseMode: semanticByName("feature.txt")?.baseMode,
+        baseType: semanticByName("feature.txt")?.baseType,
+        headMode: semanticByName("feature.txt")?.headMode,
+        headType: semanticByName("feature.txt")?.headType,
+        treeModesComplete: semanticByName("feature.txt")?.treeModesComplete,
+      },
+      {
+        baseMode: null,
+        baseType: null,
+        headMode: "100644",
+        headType: "blob",
+        treeModesComplete: true,
+      },
+    );
+
+    assert.equal(result.context.counts.pullFiles, 2);
+    assert.equal(result.context.counts.pullFilesHydrated, 2);
+    assert.equal(result.context.counts.pullFilesTruncated, false);
+    assert.equal(result.context.counts.pullCommits, 1);
+    assert.equal(result.context.counts.pullCommitsHydrated, 1);
+    assert.equal(result.context.counts.pullCommitsTruncated, false);
+    assert.match(result.context.pullCommitsRevision ?? "", /^[0-9a-f]{64}$/);
     assert.equal(result.baseSha, git(dir, "rev-parse", "base-ref"));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -109,6 +153,34 @@ test("buildLocalRangeReview falls back to a range title when the commit subject 
     // title = `local range ${baseSha.slice(0,8)}..${headSha.slice(0,8)}`
     assert.equal(result.item.title, `local range ${baseSha.slice(0, 8)}..${headSha.slice(0, 8)}`);
     assert.equal(result.item.title, result.context.issue.title);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("buildLocalRangeReview fingerprints full commit messages beyond prompt truncation", () => {
+  const dir = initRepo();
+  try {
+    writeFileSync(join(dir, "keep.txt"), "base\n");
+    git(dir, "add", "keep.txt");
+    git(dir, "commit", "-q", "-m", "init");
+    git(dir, "branch", "base-ref");
+    writeFileSync(join(dir, "feature.txt"), "feature\n");
+    git(dir, "add", "feature.txt");
+    const prefix = `feat: cache\n\n${"x".repeat(1100)}`;
+    git(dir, "commit", "-q", "-m", `${prefix}a`);
+    const prior = buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref");
+
+    git(dir, "commit", "--amend", "-q", "-m", `${prefix}b`);
+    const changed = buildLocalRangeReviewForTest(dir, "openclaw/clawsweeper", "base-ref");
+    const priorMessage = (prior.context.pullCommits?.[0] as { message?: string } | undefined)
+      ?.message;
+    const changedMessage = (changed.context.pullCommits?.[0] as { message?: string } | undefined)
+      ?.message;
+
+    assert.equal(priorMessage, changedMessage);
+    assert.notEqual(prior.context.pullCommitsRevision, changed.context.pullCommitsRevision);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -241,6 +313,78 @@ test("review rejects --item-number combined with --local-range", () => {
     assert.notEqual(r.status, 0, "should exit non-zero on the flag conflict");
     assert.match((r.stderr ?? "") + (r.stdout ?? ""), /cannot be combined with --local-range/i);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+
+test("--local-range defaults to the current checkout and isolates gh config in artifacts", () => {
+  const dir = initRepo();
+  const codexDir = mkdtempSync(join(tmpdir(), "lrr-default-codex-"));
+  const fakeCodex = join(codexDir, "fake-codex.sh");
+  const fakeCodexMarker = join(codexDir, "fake-codex-ran.txt");
+  writeFileSync(
+    fakeCodex,
+    '#!/bin/sh\nprintf "%s\\n%s\\n" "$PWD" "$GH_CONFIG_DIR" > "$FAKE_CODEX_MARKER"\nexit 1\n',
+  );
+  chmodSync(fakeCodex, 0o755);
+  try {
+    writeFileSync(join(dir, "a.txt"), "base\n");
+    git(dir, "add", "a.txt");
+    git(dir, "commit", "-q", "-m", "init");
+    git(dir, "branch", "base-ref");
+    writeFileSync(join(dir, "a.txt"), "base\nfeature\n");
+    git(dir, "add", "a.txt");
+    git(dir, "commit", "-q", "-m", "feat: local range");
+
+    const result = spawnSync(
+      "node",
+      [
+        CLI,
+        "review",
+        "--local-range",
+        "--base",
+        "base-ref",
+        "--target-repo",
+        "openclaw/clawsweeper",
+      ],
+      {
+        cwd: dir,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: "1",
+          CODEX_BIN: fakeCodex,
+          FAKE_CODEX_MARKER: fakeCodexMarker,
+        },
+        timeout: 60000,
+      },
+    );
+
+    assert.notEqual(result.status, 0, "fake Codex should make the review fail after setup");
+    const [codexCwd, ghConfigDir] = readFileSync(fakeCodexMarker, "utf8").trim().split("\n");
+    assert.equal(realpathSync(codexCwd ?? ""), realpathSync(dir));
+    assert.equal(basename(ghConfigDir ?? ""), ".gh-empty");
+    assert.match(basename(dirname(ghConfigDir ?? "")), /^local-range-\d+-\d+$/);
+    const gitArtifactRoot = resolve(
+      dir,
+      git(dir, "rev-parse", "--git-path", "clawsweeper/reviews"),
+    );
+    assert.equal(realpathSync(dirname(dirname(ghConfigDir ?? ""))), realpathSync(gitArtifactRoot));
+    assert.ok(existsSync(ghConfigDir ?? ""));
+    const cacheMetrics = JSON.parse(
+      readFileSync(join(dirname(ghConfigDir ?? ""), "review-cache-metrics.json"), "utf8"),
+    ) as Record<string, unknown>;
+    assert.equal(cacheMetrics.semantic_cache_checks, 0);
+    assert.equal(cacheMetrics.semantic_cache_hits, 0);
+    assert.equal(cacheMetrics.semantic_cache_revalidations, 0);
+    assert.match(
+      readFileSync(join(dirname(ghConfigDir ?? ""), "0.md"), "utf8"),
+      /review_semantic_cache_version: unknown/,
+    );
+    assert.equal(git(dir, "status", "--porcelain"), "");
+  } finally {
+    rmSync(codexDir, { recursive: true, force: true });
     rmSync(dir, { recursive: true, force: true });
   }
 });

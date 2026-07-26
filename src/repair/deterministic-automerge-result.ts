@@ -78,11 +78,15 @@ export function deterministicAutomergeResult({
     repair_strategy: "repair_contributor_branch",
     allow_no_pr: false,
     branch_update_blockers: [],
+    repair_contract: null,
   };
 
   return {
     status: "planned",
     repo,
+    // Execution must bind to the exact PR revision hydrated by this planning
+    // pass. The job file can outlive a source-head race and is not sufficient.
+    reviewed_sha: canonical.pull_request?.head_sha ?? null,
     cluster_id: String(clusterPlan?.cluster_id ?? job?.frontmatter?.cluster_id ?? ""),
     mode,
     summary,

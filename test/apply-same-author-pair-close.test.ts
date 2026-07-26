@@ -124,7 +124,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
     base: { sha: "base-sha", ref: "main", repo: { full_name: "openclaw/openclaw" } },
     user: { login: "reporter" }
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "label" || args[0] === "issue") {
   console.log("");
@@ -145,6 +145,8 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
           "--dry-run",
           "--apply-kind",
           "all",
+          "--item-numbers",
+          "321",
           "--processed-limit",
           "4",
         ],
@@ -287,7 +289,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
     merged_at: null,
     labels: [{ name: "bug" }]
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "label" || args[0] === "issue") {
   console.log("");
@@ -448,7 +450,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/321\\/timeline(?:\\?|$
     comments: 0,
     pull_request: { url: "https://api.github.com/repos/openclaw/openclaw/pulls/400" }
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "issue" && args[1] === "view") {
   console.log(JSON.stringify({ closedByPullRequestsReferences: [] }));
@@ -611,7 +613,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
     base: { sha: "base-sha", ref: "main", repo: { full_name: "openclaw/openclaw" } },
     user: { login: "reporter" }
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "label" || args[0] === "issue") {
   console.log("");
@@ -634,6 +636,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
           "all",
           "--processed-limit",
           "1",
+          "--event-apply-proof",
         ],
       });
     });
@@ -643,6 +646,8 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
         number: 321,
         action: "skipped_same_author_pair",
         reason: "open issue #320 (Paired issue) by the same author is paired with this PR",
+        guardedOpenStateVerified: true,
+        terminalPolicyNoopVerified: true,
       },
     ]);
   } finally {
@@ -650,7 +655,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
   }
 });
 
-test("apply-decisions keeps same-author PR blocked when counterpart comment needs sync", () => {
+test("apply-decisions keeps same-author PR blocked when counterpart needs a maintainer decision", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
     const itemsDir = join(root, "items");
@@ -667,6 +672,29 @@ test("apply-decisions keeps same-author PR blocked when counterpart comment need
         title: "Paired issue",
         author: "reporter",
         action_taken: "skipped_same_author_pair",
+        maintainer_decision: JSON.stringify({
+          required: true,
+          kind: "product_direction",
+          question: "Should this issue be closed with its paired PR?",
+          rationale: "Closing the pair would settle a product contract that maintainers must own.",
+          options: [
+            {
+              title: "Keep the pair open",
+              body: "Retain both items until the product contract is decided.",
+              recommended: true,
+            },
+            {
+              title: "Close the pair",
+              body: "Accept the proposed contract and close both items.",
+              recommended: false,
+            },
+          ],
+          likelyOwner: {
+            person: "@owner",
+            reason: "Recent history identifies this maintainer as the contract owner.",
+            confidence: "high",
+          },
+        }),
       }),
       320,
       "implemented_on_main",
@@ -687,6 +715,7 @@ test("apply-decisions keeps same-author PR blocked when counterpart comment need
     writeFileSync(join(itemsDir, "321.md"), pullSynced.report, "utf8");
 
     const ghMock = `
+const issueComment = ${JSON.stringify(issueSynced.comment)};
 const pullComment = ${JSON.stringify(pullSynced.comment)};
 const rawArgs = process.argv.slice(2);
 const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
@@ -694,7 +723,14 @@ const path = args[1] || "";
 if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?:\\?|$)/.test(args[2] || "")) {
   console.log("HTTP/2 200\\n\\n[]");
 } else if (args[0] === "api" && /\\/issues\\/320\\/comments(?:\\?|$)/.test(path)) {
-  console.log(JSON.stringify([[]]));
+  console.log(JSON.stringify([[{
+    id: 9320,
+    html_url: "https://github.com/openclaw/openclaw/issues/320#issuecomment-9320",
+    created_at: "2026-05-01T01:00:00Z",
+    updated_at: "2026-05-01T01:00:00Z",
+    user: { login: "clawsweeper[bot]" },
+    body: issueComment
+  }]]));
 } else if (args[0] === "api" && /\\/issues\\/321\\/comments(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[{
     id: 9321,
@@ -721,7 +757,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
     author_association: "CONTRIBUTOR",
     user: { login: "reporter" },
     labels: [],
-    comments: 0,
+    comments: 1,
     pull_request: null
   }));
 } else if (args[0] === "api" && /\\/issues\\/321$/.test(path)) {
@@ -758,7 +794,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/(320|321)\\/timeline(?
     base: { sha: "base-sha", ref: "main", repo: { full_name: "openclaw/openclaw" } },
     user: { login: "reporter" }
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "label" || args[0] === "issue") {
   console.log("");
@@ -907,7 +943,7 @@ if (args[0] === "api" && args[1] === "-i" && /\\/issues\\/321\\/timeline(?:\\?|$
     base: { sha: "base-sha", ref: "main", repo: { full_name: "openclaw/openclaw" } },
     user: { login: "reporter" }
   }));
-} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments)(?:\\?|$)/.test(path)) {
+} else if (args[0] === "api" && /\\/pulls\\/321\\/(files|commits|comments|reviews)(?:\\?|$)/.test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "label" || args[0] === "issue") {
   console.log("");

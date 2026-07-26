@@ -33,7 +33,7 @@ function initRepo(): string {
   git(dir, "config", "commit.gpgsign", "false");
   writeFileSync(join(dir, "a.txt"), "1\n");
   git(dir, "add", "a.txt");
-  git(dir, "commit", "-q", "-m", "init");
+  git(dir, "commit", "-q", "--author", "Test Author <test@example.com>", "-m", "init");
   return dir;
 }
 
@@ -124,6 +124,7 @@ test("local-review exposes distinct current engines including AGY, cursor, and o
   assert.deepEqual(LOCAL_REVIEW_SUPPORTED_ENGINES, [
     "codex",
     "claude",
+    "grok",
     "agy-claude",
     "agy-gemini",
     "cursor",
@@ -174,7 +175,7 @@ test("local-review rejects an unknown --engine", () => {
     assert.equal(status, 1);
     assert.match(
       out,
-      /--engine must be "codex", "claude", "agy-claude", "agy-gemini", "cursor", "opencode"/,
+      /--engine must be "codex", "claude", "grok", "agy-claude", "agy-gemini", "cursor", "opencode"/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

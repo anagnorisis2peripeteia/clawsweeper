@@ -15,7 +15,6 @@ import test from "node:test";
 
 import {
   codexFailureDecisionForTest,
-  lowerCodexReasoningEffort,
   redactInternalCodexModel,
   runCodexForTest,
   runReviewWithEngineForTest,
@@ -406,7 +405,30 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
   };
 
   try {
-    assert.ok(runAndReadArgs(false).includes('forced_login_method="chatgpt"'));
+    const defaultArgs = runAndReadArgs(false);
+    assert.deepEqual(defaultArgs, [
+      "exec",
+      "--model",
+      "model-test",
+      "-c",
+      'model_reasoning_effort="high"',
+      "-c",
+      'forced_login_method="chatgpt"',
+      "-c",
+      'approval_policy="never"',
+      "-C",
+      openclawDir,
+      "--output-schema",
+      join(process.cwd(), "schema", "clawsweeper-decision.schema.json"),
+      "--output-last-message",
+      join(workDir, "83395.json"),
+      "--json",
+      "--sandbox",
+      "read-only",
+      "--add-dir",
+      join(workDir, "proof-scratch", "83395"),
+      "-",
+    ]);
     assert.equal(runAndReadArgs(true).includes('forced_login_method="chatgpt"'), false);
     assert.equal(
       runAndReadArgs(true).some((arg) => arg.startsWith("forced_login_method=")),
@@ -739,21 +761,13 @@ process.stdin.on("end", () => {
   }
 });
 
-test("lowerCodexReasoningEffort steps down one tier and stops at minimal", () => {
-  assert.equal(lowerCodexReasoningEffort("high"), "low");
-  assert.equal(lowerCodexReasoningEffort("HIGH"), "low");
-  assert.equal(lowerCodexReasoningEffort(" medium "), "low");
-  assert.equal(lowerCodexReasoningEffort("low"), "minimal");
-  assert.equal(lowerCodexReasoningEffort("minimal"), null);
-  assert.equal(lowerCodexReasoningEffort("unknown"), null);
-});
-
-test("runCodex completes via a lower-effort fallback after transport exhaustion", () => {
+test("runCodex keeps high reasoning for the final transport retry", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
   const binDir = join(root, "bin");
   const attemptsPath = join(root, "attempts");
+  const attemptTimesPath = join(root, "attempt-times");
   mkdirSync(openclawDir, { recursive: true });
   mkdirSync(binDir, { recursive: true });
   execFileSync("git", ["init"], { cwd: openclawDir, stdio: "ignore" });
@@ -767,8 +781,13 @@ const effort = cfg ? cfg.split("=")[1].replace(/"/g, "") : "";
 const attemptsPath = process.env.CODEX_ATTEMPTS_PATH;
 const n = fs.existsSync(attemptsPath) ? Number(fs.readFileSync(attemptsPath, "utf8")) + 1 : 1;
 fs.writeFileSync(attemptsPath, String(n));
-if (effort !== "low") {
-  process.stderr.write("Rate limit reached on tokens per min (TPM). Please try again in 1ms.\\n");
+fs.appendFileSync(process.env.CODEX_ATTEMPT_TIMES_PATH, \`\${Date.now()}\\n\`);
+if (effort !== "high") {
+  process.stderr.write(\`unexpected reasoning effort: \${effort}\\n\`);
+  process.exit(9);
+}
+if (n < 3) {
+  process.stderr.write("Rate limit reached on tokens per min (TPM). Please try again in 100ms.\\n");
   process.exit(1);
 }
 const outputIndex = process.argv.indexOf("--output-last-message");
@@ -779,6 +798,7 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
   const previous = {
     PATH: process.env.PATH,
     CODEX_ATTEMPTS_PATH: process.env.CODEX_ATTEMPTS_PATH,
+    CODEX_ATTEMPT_TIMES_PATH: process.env.CODEX_ATTEMPT_TIMES_PATH,
     CODEX_DECISION_JSON: process.env.CODEX_DECISION_JSON,
     CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS: process.env.CLAWSWEEPER_CODEX_REVIEW_ATTEMPTS,
     CLAWSWEEPER_CODEX_REVIEW_RETRY_DELAY_MS: process.env.CLAWSWEEPER_CODEX_REVIEW_RETRY_DELAY_MS,
@@ -786,6 +806,7 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
   };
   process.env.PATH = `${binDir}${delimiter}${process.env.PATH ?? ""}`;
   process.env.CODEX_ATTEMPTS_PATH = attemptsPath;
+  process.env.CODEX_ATTEMPT_TIMES_PATH = attemptTimesPath;
   process.env.CODEX_DECISION_JSON = JSON.stringify(
     closeDecision({
       decision: "close",
@@ -816,15 +837,16 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
     });
 
     assert.equal(readFileSync(attemptsPath, "utf8"), "3");
+    const attemptTimes = readFileSync(attemptTimesPath, "utf8").trim().split("\n").map(Number);
+    assert.equal(attemptTimes.length, 3);
+    assert.ok((attemptTimes[2] ?? 0) - (attemptTimes[1] ?? 0) >= 90);
     assert.equal(decision.decision, "close");
-    assert.equal(decision.confidence, "medium");
-    assert.match(decision.summary, /^Degraded review:/);
-    assert.match(decision.summary, /lower-effort \(low\) fallback pass/);
-    assert.match(decision.summary, /Resolved on main already\./);
-    assert.equal(decision.evidence[0]?.label, "degraded review mode");
-    assert.match(decision.evidence[0]?.detail ?? "", /high → low reasoning effort fallback/);
-    assert.equal(decision.evidence[1]?.label, "original codex transport failure");
-    assert.match(decision.evidence[1]?.detail ?? "", /Rate limit reached|tokens per min/i);
+    assert.equal(decision.confidence, "high");
+    assert.equal(decision.summary, "Resolved on main already.");
+    assert.equal(
+      decision.evidence.some((entry) => entry.label === "degraded review mode"),
+      false,
+    );
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -834,7 +856,7 @@ fs.writeFileSync(process.argv[outputIndex + 1], process.env.CODEX_DECISION_JSON)
   }
 });
 
-test("runCodex keeps the transport classification when the fallback also fails", () => {
+test("runCodex keeps the transport classification when the final high retry also fails", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
@@ -887,7 +909,7 @@ process.exit(1);
       (error: unknown) => {
         const reviewError = error as Error;
         assert.equal(readFileSync(attemptsPath, "utf8"), "3");
-        assert.match(reviewError.message, /Lower-effort \(low\) fallback also failed/);
+        assert.match(reviewError.message, /Final high-reasoning retry also failed/);
         const failure = codexFailureDecisionForTest(
           1,
           reviewError.message,
@@ -907,7 +929,7 @@ process.exit(1);
   }
 });
 
-test("runCodex skips the lower-effort fallback when the time budget is too small", () => {
+test("runCodex skips the final high retry when the time budget is too small", () => {
   const root = mkdtempSync(tmpPrefix);
   const openclawDir = join(root, "openclaw");
   const workDir = join(root, "codex-work");
@@ -1047,6 +1069,20 @@ test("Codex failure redaction hides the configured internal model", () => {
   }
 });
 
+test("agent failure redaction hides the configured OpenClaw model", () => {
+  const previous = process.env.CLAWSWEEPER_OPENCLAW_MODEL;
+  try {
+    process.env.CLAWSWEEPER_OPENCLAW_MODEL = "private-provider/private-model";
+    assert.equal(
+      redactInternalCodexModel("selected private-provider/private-model"),
+      "selected [REDACTED_INTERNAL_MODEL]",
+    );
+  } finally {
+    if (previous === undefined) delete process.env.CLAWSWEEPER_OPENCLAW_MODEL;
+    else process.env.CLAWSWEEPER_OPENCLAW_MODEL = previous;
+  }
+});
+
 test("Codex failure redaction reads the default home configuration", () => {
   const root = mkdtempSync(tmpPrefix);
   const codexHome = join(root, ".codex");
@@ -1054,11 +1090,13 @@ test("Codex failure redaction reads the default home configuration", () => {
   writeFileSync(join(codexHome, "config.toml"), 'model = "default-secret-model"\n');
   const previous = {
     HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
     CODEX_HOME: process.env.CODEX_HOME,
     CLAWSWEEPER_INTERNAL_MODEL: process.env.CLAWSWEEPER_INTERNAL_MODEL,
   };
   try {
     process.env.HOME = root;
+    process.env.USERPROFILE = root;
     delete process.env.CODEX_HOME;
     delete process.env.CLAWSWEEPER_INTERNAL_MODEL;
     assert.equal(

@@ -1,13 +1,23 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 import { renderReviewCommentFromReport } from "../dist/clawsweeper.js";
+import { createReviewedPrActivityCursor } from "../dist/review-activity-cursor.js";
 
 export const tmpPrefix = join(tmpdir(), "clawsweeper-test-");
+export const emptyReviewedPrActivityCursor =
+  createReviewedPrActivityCursor({ reviews: [], inlineComments: [], reviewThreads: [] }) ??
+  (() => {
+    throw new Error("empty reviewed PR activity must produce a cursor");
+  })();
+
+export function readText(filePath: string): string {
+  return readFileSync(filePath, "utf8").replace(/\r\n/g, "\n");
+}
 
 export function item(overrides = {}) {
   return {
@@ -32,6 +42,8 @@ export function closeDecision(overrides = {}) {
     confidence: "high",
     summary: "Current main already implements this.",
     changeSummary: "Requests confirmation that the feature works on current main.",
+    systemContext: "",
+    architectureDiagram: "",
     evidence: [
       {
         label: "implementation",
@@ -78,6 +90,14 @@ export function closeDecision(overrides = {}) {
     ],
     risks: [],
     bestSolution: "Keep the implementation as-is.",
+    maintainerDecision: {
+      required: false,
+      kind: "none",
+      question: "",
+      rationale: "",
+      options: [],
+      likelyOwner: { person: "", reason: "", confidence: "low" },
+    },
     triagePriority: "P2",
     impactLabels: [],
     maturityLabels: [],
@@ -211,6 +231,9 @@ export function reportFrontMatter(overrides = {}) {
     action_taken: "kept_open",
     ...overrides,
   };
+  if (values.type === "pull_request" && !Object.hasOwn(values, "review_activity_cursor")) {
+    Object.assign(values, { review_activity_cursor: emptyReviewedPrActivityCursor });
+  }
   return `---
 ${Object.entries(values)
   .map(([key, value]) => `${key}: ${value}`)
@@ -276,10 +299,40 @@ ${values.nextSteps}
 
 export function detailsBody(markdown, summary) {
   const marker = `<summary>${summary}</summary>`;
-  const markerIndex = markdown.indexOf(marker);
+  let markerIndex = markdown.indexOf(marker);
+  let matchedMarker = marker;
+  if (markerIndex === -1 && summary === "Agent review details") {
+    matchedMarker = "<summary><strong>Agent review details</strong></summary>";
+    markerIndex = markdown.indexOf(matchedMarker);
+  }
+  if (
+    markerIndex === -1 &&
+    ["Review details", "Label changes", "Evidence reviewed"].includes(summary)
+  ) {
+    matchedMarker = "<summary><strong>Agent review details</strong></summary>";
+    markerIndex = markdown.indexOf(matchedMarker);
+  }
   assert.notEqual(markerIndex, -1, `missing details summary ${summary}`);
-  const bodyStart = markerIndex + marker.length;
-  const bodyEnd = markdown.indexOf("</details>", bodyStart);
+  const bodyStart = markerIndex + matchedMarker.length;
+  let depth = 1;
+  let cursor = bodyStart;
+  let bodyEnd = -1;
+  while (depth > 0) {
+    const nextOpen = markdown.indexOf("<details>", cursor);
+    const nextClose = markdown.indexOf("</details>", cursor);
+    if (nextClose === -1) break;
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth += 1;
+      cursor = nextOpen + "<details>".length;
+      continue;
+    }
+    depth -= 1;
+    if (depth === 0) {
+      bodyEnd = nextClose;
+      break;
+    }
+    cursor = nextClose + "</details>".length;
+  }
   assert.notEqual(bodyEnd, -1, `missing details close for ${summary}`);
   return markdown.slice(bodyStart, bodyEnd);
 }
@@ -322,6 +375,12 @@ export function workPlanCandidateReport(overrides = {}) {
     work_cluster_refs: JSON.stringify(["openclaw/clawsweeper#26"]),
     ...overrides,
   };
+  if (
+    frontmatter.type === "pull_request" &&
+    !Object.hasOwn(frontmatter, "review_activity_cursor")
+  ) {
+    Object.assign(frontmatter, { review_activity_cursor: emptyReviewedPrActivityCursor });
+  }
   return `---
 ${Object.entries(frontmatter)
   .map(([key, value]) => `${key}: ${value}`)
@@ -421,15 +480,50 @@ export function promotionGhMock(options: {
   itemUpdatedAtAfterLabelSyncLogPath?: string;
   itemUpdatedAtAfterProof?: string;
   itemUpdatedAtAfterProofLogPath?: string;
+  headSha?: string;
+  changedFiles?: number;
+  sourceFiles?: Array<string | { filename: string; status: string }>;
   issueCommentCount?: number;
   comment: string;
   commentWriteLogPath?: string;
+  commentWriteError?: string;
   closeAppliedBodyLogPath?: string;
+  closeCommandLogPath?: string;
+  closeCommandDelayMs?: number;
   comments?: unknown[];
+  commentsAfterFirstRead?: unknown[];
+  commentsAfterCommentWrite?: unknown[];
+  reviews?: unknown[];
+  reviewsAfterFirstRead?: unknown[];
+  reviewsAfterFirstMutation?: unknown[];
+  pullReviewComments?: unknown[];
+  reviewThreads?: unknown[];
+  reviewThreadsAfterFirstRead?: unknown[];
   timeline?: unknown[];
+  mergeable?: boolean | null;
+  mergeableState?: string | null;
+  headActivityAt?: string | null;
+  headRunPullRequests?: unknown[];
+  authorLogin?: string;
+  authorAssociation?: string;
+  openPrCount?: number;
+  authorSearchIncomplete?: boolean;
+  authorSearchError?: string;
+  headCommittedAt?: string;
+  statusActivityAt?: string;
+  checkActivityAt?: string;
+  assignees?: unknown[];
+  requestedReviewers?: unknown[];
+  requestedTeams?: unknown[];
   linkedPulls?: Record<number, unknown>;
   linkedPullsAfterProof?: Record<number, unknown>;
+  linkedPullsAfterCommentRead?: Record<number, unknown>;
+  linkedPullHangAfterProof?: boolean;
   linkedIssues?: Record<number, unknown>;
+  defaultBranch?: string;
+  postHeadPathChanges?: Record<string, string | null>;
+  deletedMainPaths?: string[];
+  pathLookupError?: string;
 }) {
   const title = options.title ?? "Stale F PR";
   const itemCreatedAt = options.itemCreatedAt ?? "2026-02-01T00:00:00Z";
@@ -451,7 +545,8 @@ export function promotionGhMock(options: {
   const linkedPulls = options.linkedPulls ?? {};
   const linkedIssues = options.linkedIssues ?? {};
   return `
-	const { appendFileSync, existsSync } = require("fs");
+	const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("fs");
+	const { join } = require("path");
 	const rawArgs = process.argv.slice(2);
 	const args = rawArgs[0] === "--repo" ? rawArgs.slice(2) : rawArgs;
 	const path = args[1] || "";
@@ -459,17 +554,89 @@ export function promotionGhMock(options: {
 	const jqIndex = args.indexOf("--jq");
 	const jq = jqIndex >= 0 ? args[jqIndex + 1] : "";
 	const comments = ${JSON.stringify(comments)};
+	const commentsAfterFirstRead = ${JSON.stringify(options.commentsAfterFirstRead ?? null)};
+	const commentsAfterCommentWrite = ${JSON.stringify(options.commentsAfterCommentWrite ?? null)};
+	const reviews = ${JSON.stringify(options.reviews ?? [])};
+	const reviewsAfterFirstRead = ${JSON.stringify(options.reviewsAfterFirstRead ?? null)};
+	const reviewsAfterFirstMutation = ${JSON.stringify(options.reviewsAfterFirstMutation ?? null)};
+	const pullReviewComments = ${JSON.stringify(options.pullReviewComments ?? [])};
+	const reviewThreads = ${JSON.stringify(options.reviewThreads ?? [])};
+	const reviewThreadsAfterFirstRead = ${JSON.stringify(options.reviewThreadsAfterFirstRead ?? null)};
 	const timeline = ${JSON.stringify(timeline)};
 	const linkedPulls = ${JSON.stringify(linkedPulls)};
 	const linkedPullsAfterProof = ${JSON.stringify(options.linkedPullsAfterProof ?? {})};
+	const linkedPullsAfterCommentRead = ${JSON.stringify(options.linkedPullsAfterCommentRead ?? {})};
+	const linkedPullHangAfterProof = ${JSON.stringify(options.linkedPullHangAfterProof ?? false)};
 	const linkedIssues = ${JSON.stringify(linkedIssues)};
+	const defaultBranch = ${JSON.stringify(options.defaultBranch ?? "main")};
+	const postHeadPathChanges = ${JSON.stringify(options.postHeadPathChanges ?? {})};
+	const deletedMainPaths = new Set(${JSON.stringify(options.deletedMainPaths ?? [])});
+	const pathLookupError = ${JSON.stringify(options.pathLookupError ?? "")};
+	const obsolescenceFileLookup = ${JSON.stringify(
+    options.postHeadPathChanges !== undefined || options.deletedMainPaths !== undefined,
+  )};
 	const commentWriteLogPath = ${JSON.stringify(options.commentWriteLogPath ?? "")};
+	const commentWriteError = ${JSON.stringify(options.commentWriteError ?? "")};
 	const closeAppliedBodyLogPath = ${JSON.stringify(options.closeAppliedBodyLogPath ?? "")};
+	const closeCommandLogPath = ${JSON.stringify(options.closeCommandLogPath ?? "")};
+	const closeCommandDelayMs = ${JSON.stringify(options.closeCommandDelayMs ?? 0)};
 	const number = ${options.number};
+	const commentStatePath = join(__dirname, "..", "comment-state-" + number + ".json");
+	const commentReadStatePath = join(__dirname, "..", "comment-read-" + number);
+	const reviewReadStatePath = join(__dirname, "..", "review-read-" + number);
+	const reviewThreadReadStatePath = join(__dirname, "..", "review-thread-read-" + number);
+	const mutationComment = (id, body) => ({
+	  id,
+	  html_url: "https://github.com/openclaw/openclaw/pull/" + number + "#issuecomment-" + id,
+	  created_at: "2026-05-01T01:00:00Z",
+	  updated_at: "2026-05-01T02:00:00Z",
+	  user: { login: "clawsweeper[bot]" },
+	  body
+	});
+	const writeMutationComment = () => {
+	  const input = args[args.indexOf("--input") + 1];
+	  const body = JSON.parse(readFileSync(input, "utf8")).body;
+	  const idMatch = path.match(/\\/issues\\/comments\\/(\\d+)$/);
+	  const id = idMatch ? Number(idMatch[1]) : 9000 + number;
+	  const comment = mutationComment(id, body);
+	  writeFileSync(commentStatePath, JSON.stringify(comment), "utf8");
+	  return comment;
+	};
+	const liveComments = () => {
+	  const sourceComments = commentsAfterCommentWrite && existsSync(commentStatePath)
+	    ? commentsAfterCommentWrite
+	    : commentsAfterFirstRead && existsSync(commentReadStatePath)
+	      ? commentsAfterFirstRead
+	      : comments;
+	  if (!existsSync(commentStatePath)) return sourceComments;
+	  const written = JSON.parse(readFileSync(commentStatePath, "utf8"));
+	  const existingIndex = sourceComments.findIndex((comment) => comment && comment.id === written.id);
+	  if (existingIndex < 0) return [...sourceComments, written];
+	  return sourceComments.map((comment, index) => index === existingIndex ? { ...comment, ...written } : comment);
+	};
 		const title = ${JSON.stringify(title)};
 		const labels = ${JSON.stringify(options.labels ?? ["status: 📣 needs proof"])};
 		const itemCreatedAt = ${JSON.stringify(itemCreatedAt)};
 		const itemUpdatedAt = ${JSON.stringify(itemUpdatedAt)};
+		const changedFiles = ${options.changedFiles ?? 2};
+		const mergeable = ${JSON.stringify(options.mergeable ?? false)};
+		const mergeableState = ${JSON.stringify(options.mergeableState ?? "dirty")};
+		const headActivityAt = ${JSON.stringify(
+      options.headActivityAt === undefined ? "2026-02-01T01:00:00Z" : options.headActivityAt,
+    )};
+		const authorLogin = ${JSON.stringify(options.authorLogin ?? "reporter")};
+		const authorAssociation = ${JSON.stringify(options.authorAssociation ?? "CONTRIBUTOR")};
+		const openPrCount = ${JSON.stringify(options.openPrCount ?? 16)};
+		const authorSearchIncomplete = ${JSON.stringify(options.authorSearchIncomplete ?? false)};
+		const authorSearchError = ${JSON.stringify(options.authorSearchError ?? "")};
+		const headCommittedAt = ${JSON.stringify(options.headCommittedAt ?? "2026-02-01T00:00:00Z")};
+		const statusActivityAt = ${JSON.stringify(options.statusActivityAt ?? "")};
+		const checkActivityAt = ${JSON.stringify(options.checkActivityAt ?? "")};
+		const sourceFiles = ${JSON.stringify(
+      (options.sourceFiles ?? ["src/runtime.ts", "test/runtime.test.ts"]).map((entry) =>
+        typeof entry === "string" ? { filename: entry, status: "modified" } : entry,
+      ),
+    )};
 		const itemUpdatedAtAfterLabelSync = ${JSON.stringify(
       options.itemUpdatedAtAfterLabelSync ?? "",
     )};
@@ -483,9 +650,11 @@ export function promotionGhMock(options: {
 		const proofHasRun = () =>
 		  itemUpdatedAtAfterProofLogPath &&
 		  existsSync(itemUpdatedAtAfterProofLogPath);
-		const liveLinkedPulls = proofHasRun()
-		  ? { ...linkedPulls, ...linkedPullsAfterProof }
-		  : linkedPulls;
+		const liveLinkedPulls = {
+		  ...linkedPulls,
+		  ...(proofHasRun() ? linkedPullsAfterProof : {}),
+		  ...(existsSync(commentReadStatePath) ? linkedPullsAfterCommentRead : {})
+		};
 		const liveUpdatedAt =
 		  itemUpdatedAtAfterProof &&
 		  itemUpdatedAtAfterProofLogPath &&
@@ -497,22 +666,70 @@ export function promotionGhMock(options: {
 		      ? itemUpdatedAtAfterLabelSync
 		      : itemUpdatedAt;
 	const issueCommentCount = ${issueCommentCount};
-	if (args[0] === "api" && args[1] === "-i" && new RegExp("/issues/" + number + "/timeline(?:\\\\?|$)").test(args[2] || "")) {
+	if (args[0] === "api" && path === "search/issues") {
+	  if (authorSearchError) {
+	    console.error(authorSearchError);
+	    process.exit(1);
+	  }
+	  console.log(JSON.stringify({ total_count: openPrCount, incomplete_results: authorSearchIncomplete, items: [] }));
+	} else if (args[0] === "api" && args[1] === "graphql") {
+	  const currentReviewThreads =
+	    reviewThreadsAfterFirstRead && existsSync(reviewThreadReadStatePath)
+	      ? reviewThreadsAfterFirstRead
+	      : reviewThreads;
+	  if (!existsSync(reviewThreadReadStatePath)) writeFileSync(reviewThreadReadStatePath, "read", "utf8");
+	  console.log(JSON.stringify({
+	    data: {
+	      repository: {
+	        pullRequest: {
+	          reviewThreads: {
+	            nodes: currentReviewThreads,
+	            pageInfo: { hasNextPage: false, endCursor: null }
+	          }
+	        }
+	      }
+	    }
+	  }));
+	} else if (args[0] === "api" && args[1] === "-i" && new RegExp("/issues/" + number + "/timeline(?:\\\\?|$)").test(args[2] || "")) {
 	  console.log("HTTP/2 200\\n\\n" + JSON.stringify(timeline));
 	} else if (args[0] === "api" && new RegExp("/issues/" + number + "/comments$").test(path) && args.includes("--method")) {
 	  if (commentWriteLogPath) appendFileSync(commentWriteLogPath, args.join(" ") + "\\n");
+	  if (commentWriteError) {
+	    console.error(commentWriteError);
+	    process.exit(1);
+	  }
 	  if (closeAppliedBodyLogPath) {
 	    const input = args[args.indexOf("--input") + 1];
-	    appendFileSync(closeAppliedBodyLogPath, JSON.parse(require("fs").readFileSync(input, "utf8")).body + "\\n---body---\\n");
+	    appendFileSync(closeAppliedBodyLogPath, JSON.parse(readFileSync(input, "utf8")).body + "\\n---body---\\n");
 	  }
+	  console.log(JSON.stringify(writeMutationComment()));
+	} else if (args[0] === "api" && new RegExp("/issues/comments/\\\\d+$").test(path) && args[args.indexOf("--method") + 1] === "DELETE") {
+	  if (commentWriteLogPath) appendFileSync(commentWriteLogPath, args.join(" ") + "\\n");
 	  console.log("");
 	} else if (args[0] === "api" && new RegExp("/issues/comments/\\\\d+$").test(path) && args.includes("--method")) {
 	  if (commentWriteLogPath) appendFileSync(commentWriteLogPath, args.join(" ") + "\\n");
-	  console.log("");
+	  if (commentWriteError) {
+	    console.error(commentWriteError);
+	    process.exit(1);
+	  }
+	  console.log(JSON.stringify(writeMutationComment()));
 	} else if (args[0] === "api" && new RegExp("/issues/" + number + "/comments(?:\\\\?|$)").test(path)) {
-	  console.log(JSON.stringify(slurp ? [comments] : comments));
-	} else if (args[0] === "api" && new RegExp("/issues/" + number + "/timeline(?:\\\\?|$)").test(path)) {
+	  const currentComments = liveComments();
+	  if (!existsSync(commentReadStatePath)) writeFileSync(commentReadStatePath, "read", "utf8");
+	  console.log(JSON.stringify(slurp ? [currentComments] : currentComments));
+} else if (args[0] === "api" && new RegExp("/issues/" + number + "/timeline(?:\\\\?|$)").test(path)) {
   console.log(JSON.stringify(slurp ? [timeline] : timeline));
+} else if (args[0] === "api" && new RegExp("/pulls/" + number + "/reviews(?:\\\\?|$)").test(path)) {
+  const currentReviews =
+    reviewsAfterFirstMutation &&
+    itemUpdatedAtAfterLabelSyncLogPath &&
+    existsSync(itemUpdatedAtAfterLabelSyncLogPath)
+      ? reviewsAfterFirstMutation
+      : reviewsAfterFirstRead && existsSync(reviewReadStatePath)
+        ? reviewsAfterFirstRead
+        : reviews;
+  if (!existsSync(reviewReadStatePath)) writeFileSync(reviewReadStatePath, "read", "utf8");
+  console.log(JSON.stringify(slurp ? [currentReviews] : currentReviews));
 } else if (args[0] === "api" && new RegExp("/issues/" + number + "$").test(path)) {
   console.log(JSON.stringify({
     number,
@@ -525,9 +742,10 @@ export function promotionGhMock(options: {
     state: "open",
     locked: false,
     active_lock_reason: null,
-    author_association: "CONTRIBUTOR",
-    user: { login: "reporter" },
+    author_association: authorAssociation,
+    user: { login: authorLogin },
     labels,
+    assignees: ${JSON.stringify(options.assignees ?? [])},
     comments: issueCommentCount,
     pull_request: { url: "https://api.github.com/repos/openclaw/openclaw/pulls/" + number }
   }));
@@ -537,21 +755,73 @@ export function promotionGhMock(options: {
     title,
     html_url: "https://github.com/openclaw/openclaw/pull/" + number,
     state: "open",
-    changed_files: 2,
+    created_at: itemCreatedAt,
+    mergeable,
+    mergeable_state: mergeableState,
+    changed_files: changedFiles,
     commits: 1,
     review_comments: 0,
     body: "Stale PR body.",
-    head: { sha: "head-sha", ref: "branch", repo: { full_name: "fork/openclaw" } },
+    requested_reviewers: ${JSON.stringify(options.requestedReviewers ?? [])},
+    requested_teams: ${JSON.stringify(options.requestedTeams ?? [])},
+    head: { sha: ${JSON.stringify(options.headSha ?? "head-sha")}, ref: "branch", repo: { id: 123, full_name: "fork/openclaw" } },
     base: { sha: "base-sha", ref: "main", repo: { full_name: "openclaw/openclaw" } },
-    user: { login: "reporter" }
+    user: { login: authorLogin }
   }));
-	} else if (args[0] === "api" && /\\/pulls\\/(\\d+)$/.test(path)) {
-	  const linkedNumber = Number((path.match(/\\/pulls\\/(\\d+)$/) || [])[1]);
-	  if (!liveLinkedPulls[linkedNumber]) {
-	    console.error("unexpected linked pull", linkedNumber);
+	} else if (args[0] === "api" && /\\/actions\\/runs\\?/.test(path)) {
+	  console.log(JSON.stringify({
+	    workflow_runs: headActivityAt ? [{
+	      event: "pull_request",
+	      created_at: headActivityAt,
+	      head_branch: "branch",
+	      head_repository: { id: 123, full_name: "fork/openclaw" },
+	      pull_requests: ${JSON.stringify(options.headRunPullRequests ?? [{ number: options.number }])}
+	    }] : []
+	  }));
+	} else if (args[0] === "api" && /\\/commits\\/head-sha\\/status(?:\\?|$)/.test(path)) {
+	  console.log(JSON.stringify({
+	    state: "success",
+	    statuses: statusActivityAt ? [{ state: "success", updated_at: statusActivityAt }] : []
+	  }));
+	} else if (args[0] === "api" && /\\/commits\\/head-sha\\/check-runs(?:\\?|$)/.test(path)) {
+	  console.log(JSON.stringify({
+	    total_count: checkActivityAt ? 1 : 0,
+	    check_runs: checkActivityAt ? [{ conclusion: "success", completed_at: checkActivityAt }] : []
+	  }));
+	} else if (args[0] === "api" && /\\/commits\\/head-sha(?:\\?|$)/.test(path)) {
+	  console.log(JSON.stringify({ commit: { committer: { date: headCommittedAt } } }));
+	} else if (args[0] === "api" && path === "repos/openclaw/openclaw") {
+	  console.log(JSON.stringify({ default_branch: defaultBranch }));
+	} else if (args[0] === "api" && path.startsWith("repos/openclaw/openclaw/commits?")) {
+	  if (pathLookupError) {
+	    console.error(pathLookupError);
 	    process.exit(1);
 	  }
-	  console.log(JSON.stringify(liveLinkedPulls[linkedNumber]));
+	  const params = new URLSearchParams(path.split("?", 2)[1] || "");
+	  const filename = params.get("path") || "";
+	  const changedAt = Object.prototype.hasOwnProperty.call(postHeadPathChanges, filename)
+	    ? postHeadPathChanges[filename]
+	    : "2026-06-01T00:00:00Z";
+	  console.log(JSON.stringify(changedAt ? [{ commit: { committer: { date: changedAt } } }] : []));
+	} else if (args[0] === "api" && /\\/contents\\//.test(path)) {
+	  const prefix = "repos/openclaw/openclaw/contents/";
+	  const filename = decodeURIComponent(path.slice(prefix.length).split("?", 1)[0] || "");
+	  if (deletedMainPaths.has(filename)) {
+	    console.error("gh: Not Found (HTTP 404)");
+	    process.exit(1);
+	  }
+	  console.log(JSON.stringify({ path: filename, type: "file" }));
+	} else if (args[0] === "api" && /\\/pulls\\/(\\d+)$/.test(path)) {
+	  const linkedNumber = Number((path.match(/\\/pulls\\/(\\d+)$/) || [])[1]);
+	  if (proofHasRun() && linkedPullHangAfterProof) {
+	    setTimeout(() => {}, 60_000);
+	  } else {
+	    if (!liveLinkedPulls[linkedNumber]) {
+	      console.error("unexpected linked pull", linkedNumber);
+	      process.exit(1);
+	    }
+	    console.log(JSON.stringify(liveLinkedPulls[linkedNumber]));
+	  }
 	} else if (args[0] === "api" && /\\/issues\\/(\\d+)\\/comments(?:\\?|$)/.test(path)) {
 	  const linkedNumber = Number((path.match(/\\/issues\\/(\\d+)\\/comments/) || [])[1]);
 	  const linkedIssue = liveLinkedPulls[linkedNumber] || linkedIssues[linkedNumber];
@@ -599,19 +869,22 @@ export function promotionGhMock(options: {
 	    console.error("unexpected linked pull files", linkedNumber);
 	    process.exit(1);
 	  }
-	  const sourceFiles = [{ filename: "src/runtime.ts" }, { filename: "test/runtime.test.ts" }];
 	  const files = linkedNumber === number ? sourceFiles : liveLinkedPulls[linkedNumber].files || sourceFiles;
   if (jq === "[.[].filename]") {
     console.log(JSON.stringify(files.map((file) =>
       typeof file === "string" ? file : file && file.filename ? file.filename : null,
     ).filter(Boolean)));
-  } else {
-    console.log(JSON.stringify([files]));
-  }
-} else if (args[0] === "api" && new RegExp("/pulls/" + number + "/(files|commits|comments)(?:\\\\?|$)").test(path)) {
+	  } else {
+	    console.log(JSON.stringify(slurp ? [files] : obsolescenceFileLookup ? files : [files]));
+	  }
+} else if (args[0] === "api" && new RegExp("/pulls/" + number + "/comments(?:\\\\?|$)").test(path)) {
+  console.log(JSON.stringify(slurp ? [pullReviewComments] : pullReviewComments));
+} else if (args[0] === "api" && new RegExp("/pulls/" + number + "/(files|commits)(?:\\\\?|$)").test(path)) {
   console.log(JSON.stringify([[]]));
 } else if (args[0] === "pr" && args[1] === "close" && args[2] === String(number)) {
-  console.log("");
+  if (closeCommandLogPath) appendFileSync(closeCommandLogPath, args.join(" ") + "\\n");
+  if (closeCommandDelayMs > 0) setTimeout(() => console.log(""), closeCommandDelayMs);
+  else console.log("");
 	} else if (args[0] === "issue" && args[1] === "edit") {
 	  if (itemUpdatedAtAfterLabelSyncLogPath) appendFileSync(itemUpdatedAtAfterLabelSyncLogPath, args.join(" ") + "\\n");
 	  console.log("");
@@ -674,6 +947,7 @@ export function withMockCodexProof(
   run: () => void,
 ): void {
   const originalPath = process.env.PATH;
+  const originalCodexBin = process.env.CODEX_BIN;
   const binDir = join(root, "bin");
   mkdirSync(binDir, { recursive: true });
   const codexPath = join(binDir, "codex");
@@ -721,9 +995,12 @@ process.exit(1);
 `;
   writeFileSync(codexPath, script, { mode: 0o755 });
   try {
-    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.CODEX_BIN = codexPath;
+    process.env.PATH = `${binDir}${delimiter}${originalPath ?? ""}`;
     run();
   } finally {
+    if (originalCodexBin === undefined) delete process.env.CODEX_BIN;
+    else process.env.CODEX_BIN = originalCodexBin;
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
   }
@@ -782,4 +1059,19 @@ export function withMockGh(root: string, script: string, run: () => void): void 
     if (originalGhBinArgs === undefined) delete process.env.GH_BIN_ARGS;
     else process.env.GH_BIN_ARGS = originalGhBinArgs;
   }
+}
+
+export function mockCommandBinEnv(command: string, commandPath: string): NodeJS.ProcessEnv {
+  const key = command.replace(/[^A-Za-z0-9]/g, "_").toUpperCase();
+  return {
+    [`${key}_BIN`]: process.execPath,
+    [`${key}_BIN_ARGS`]: JSON.stringify([commandPath]),
+  };
+}
+
+export function mockGhBinEnv(ghPath: string, binDir?: string): NodeJS.ProcessEnv {
+  return {
+    ...mockCommandBinEnv("gh", ghPath),
+    ...(binDir ? { PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` } : {}),
+  };
 }

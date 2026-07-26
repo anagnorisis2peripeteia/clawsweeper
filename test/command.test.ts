@@ -16,9 +16,13 @@ import { fileURLToPath } from "node:url";
 
 import {
   defaultReviewArtifactDirForTest,
+  exactEventReviewLeaseDispositionForTest,
+  isSuppliedReviewStartLeaseForTest,
   prepareManagedLocalReviewCheckoutForTest,
+  reviewLeaseStillMatchesContextForTest,
 } from "../dist/clawsweeper.js";
 import { runText, UserFacingCommandError } from "../dist/command.js";
+import { mockGhBinEnv } from "./helpers.ts";
 
 const CLI = fileURLToPath(new URL("../dist/clawsweeper.js", import.meta.url));
 
@@ -93,6 +97,319 @@ test("local exact reviews default to item-specific artifacts", () => {
   assert.equal(defaultReviewArtifactDirForTest(false, 357, undefined), "artifacts/reviews");
 });
 
+test("exact event publication requeues legacy tuples and source drift before mutation", () => {
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+  const base = `---\nitem_source_revision: ${revision}\n---\n`;
+  assert.deepEqual(exactEventReviewLeaseDispositionForTest(base, revision), {
+    status: "legacy_tupleless",
+    reason: "local report has no durable lease identity",
+  });
+  assert.deepEqual(exactEventReviewLeaseDispositionForTest(base, "f".repeat(40)), {
+    status: "source_drift",
+    reportRevision: revision,
+    liveRevision: "f".repeat(40),
+  });
+  assert.deepEqual(
+    exactEventReviewLeaseDispositionForTest(
+      `---\nitem_source_revision: ${revision}\nreview_lease_owner: run-123\nreview_lease_comment_id: 99\n---\n`,
+      revision,
+    ),
+    { status: "current" },
+  );
+});
+
+test("reserved exact-review leases compare a head only for pull requests", () => {
+  const revision = "0123456789abcdef0123456789abcdef01234567";
+  assert.equal(reviewLeaseStillMatchesContextForTest("issue", null, revision), true);
+  assert.equal(reviewLeaseStillMatchesContextForTest("pull_request", revision, revision), true);
+  assert.equal(
+    reviewLeaseStillMatchesContextForTest("pull_request", "f".repeat(40), revision),
+    false,
+  );
+});
+
+test("only the exact supplied lease is externally owned", () => {
+  const supplied = { owner: "exact-issue-123", commentId: 456 };
+  assert.equal(isSuppliedReviewStartLeaseForTest(supplied, supplied), true);
+  assert.equal(
+    isSuppliedReviewStartLeaseForTest(supplied, { owner: supplied.owner, commentId: 457 }),
+    false,
+  );
+  assert.equal(
+    isSuppliedReviewStartLeaseForTest(supplied, { owner: "shard-123", commentId: 456 }),
+    false,
+  );
+});
+
+test("reserve-review-lease hydrates a legacy queue claim without cross-head cleanup", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmd-reserve-lease-"));
+  const binDir = join(root, "bin");
+  const ghPath = join(binDir, "gh.js");
+  const curlPath = join(binDir, "curl");
+  const leasePath = join(root, "lease.json");
+  const deleteLogPath = join(root, "deletes.log");
+  const curlLogPath = join(root, "curl.log");
+  const headSha = "0123456789abcdef0123456789abcdef01234567";
+  const oldHeadSha = "f".repeat(40);
+  try {
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      ghPath,
+      `
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
+const leasePath = ${JSON.stringify(leasePath)};
+const deleteLogPath = ${JSON.stringify(deleteLogPath)};
+const headSha = ${JSON.stringify(headSha)};
+const oldHeadSha = ${JSON.stringify(oldHeadSha)};
+const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+const args = process.argv.slice(2);
+const path = args[1] || "";
+const oldLease = {
+  id: 9990,
+  html_url: "https://github.com/openclaw/openclaw/pull/357#issuecomment-9990",
+  created_at: "2026-07-15T00:00:00Z",
+  updated_at: "2026-07-15T00:00:00Z",
+  user: { login: "clawsweeper[bot]" },
+  body: [
+    "ClawSweeper status: review started.",
+    \`<!-- clawsweeper-review-status:started item=357 sha=\${oldHeadSha} started_at=2026-07-15T00:00:00.000Z lease_expires_at=\${leaseExpiresAt} owner=github-run-998-1 v=1 -->\`,
+    "<!-- clawsweeper-review-lease item=357 -->",
+  ].join("\\n"),
+};
+const comments = () => existsSync(leasePath)
+  ? [oldLease, JSON.parse(readFileSync(leasePath, "utf8"))]
+  : [oldLease];
+if (args[0] === "api" && path === "repos/openclaw/openclaw/issues/357") {
+  console.log(JSON.stringify({
+    number: 357,
+    title: "Reserve durable exact review lease",
+    html_url: "https://github.com/openclaw/openclaw/pull/357",
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T00:00:00Z",
+    closed_at: null,
+    state: "open",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: [],
+    pull_request: {}
+  }));
+} else if (args[0] === "api" && path === "repos/openclaw/openclaw/pulls/357") {
+  console.log(JSON.stringify({ head: { sha: headSha } }));
+} else if (args[0] === "api" && path.startsWith("repos/openclaw/openclaw/issues/357/comments") && !args.includes("--method")) {
+  const value = comments();
+  console.log(JSON.stringify(args.includes("--slurp") ? [value] : value));
+} else if (args[0] === "api" && path === "repos/openclaw/openclaw/issues/357/comments" && args.includes("--method")) {
+  const body = JSON.parse(readFileSync(args[args.indexOf("--input") + 1], "utf8")).body;
+  const lease = {
+    id: 9991,
+    html_url: "https://github.com/openclaw/openclaw/pull/357#issuecomment-9991",
+    created_at: "2026-07-15T00:00:00Z",
+    updated_at: "2026-07-15T00:00:00Z",
+    user: { login: "clawsweeper[bot]" },
+    body
+  };
+  writeFileSync(leasePath, JSON.stringify(lease));
+  console.log(JSON.stringify(lease));
+} else if (args[0] === "api" && /repos\\/openclaw\\/openclaw\\/issues\\/comments\\/\\d+$/.test(path) && args.includes("DELETE")) {
+  appendFileSync(deleteLogPath, path + "\\n");
+  console.log("");
+} else {
+  console.error("unexpected gh args", JSON.stringify(args));
+  process.exit(1);
+}
+`,
+      "utf8",
+    );
+    writeFileSync(
+      curlPath,
+      `#!/usr/bin/env node
+require("node:fs").appendFileSync(${JSON.stringify(curlLogPath)}, process.argv.slice(2).join(" ") + "\\n");
+process.stdout.write("200");
+`,
+      "utf8",
+    );
+    chmodSync(curlPath, 0o755);
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "reserve-review-lease",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--item-number",
+        "357",
+        "--review-timeout-ms",
+        "600000",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...mockGhBinEnv(ghPath, binDir),
+          GITHUB_RUN_ID: "999",
+          GITHUB_RUN_ATTEMPT: "1",
+          EXACT_REVIEW_QUEUE_URL: "https://queue.example.invalid",
+          EXACT_REVIEW_ITEM_KEY: "openclaw/openclaw#357",
+          EXACT_REVIEW_LEASE_ID: "lease-357",
+          EXACT_REVIEW_LEASE_REVISION: "1",
+          EXACT_REVIEW_CLAIM_GENERATION: "1",
+        },
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr);
+    const reservation = JSON.parse(result.stdout);
+    assert.equal(reservation.status, "posted");
+    assert.match(reservation.owner, /^[a-zA-Z0-9._-]{1,200}$/);
+    assert.equal(reservation.commentId, 9991);
+    assert.equal(reservation.headSha, headSha);
+    const lease = JSON.parse(readFileSync(leasePath, "utf8"));
+    assert.match(lease.body, /clawsweeper-review-status:started/);
+    assert.match(lease.body, /clawsweeper-review-lease item=357/);
+    assert.match(lease.body, new RegExp(`sha=${headSha}`));
+    assert.match(readFileSync(curlLogPath, "utf8"), new RegExp(`source_head_sha.*${headSha}`));
+    assert.equal(existsSync(deleteLogPath), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reserve-review-lease stale A preserves newer-head lease B", () => {
+  const root = mkdtempSync(join(tmpdir(), "cmd-reserve-lease-race-"));
+  const binDir = join(root, "bin");
+  const ghPath = join(binDir, "gh.js");
+  const curlPath = join(binDir, "curl");
+  const postedPath = join(root, "posted.json");
+  const pullCountPath = join(root, "pull-count.txt");
+  const deleteLogPath = join(root, "deletes.log");
+  const curlLogPath = join(root, "curl.log");
+  const staleHead = "a".repeat(40);
+  const newerHead = "b".repeat(40);
+  try {
+    mkdirSync(binDir, { recursive: true });
+    writeFileSync(
+      ghPath,
+      `
+const { appendFileSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
+const postedPath = ${JSON.stringify(postedPath)};
+const pullCountPath = ${JSON.stringify(pullCountPath)};
+const deleteLogPath = ${JSON.stringify(deleteLogPath)};
+const staleHead = ${JSON.stringify(staleHead)};
+const newerHead = ${JSON.stringify(newerHead)};
+const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+const args = process.argv.slice(2);
+const path = args[1] || "";
+const newerLease = {
+  id: 9992,
+  html_url: "https://github.com/openclaw/openclaw/pull/357#issuecomment-9992",
+  created_at: "2026-07-23T13:00:02Z",
+  updated_at: "2026-07-23T13:00:02Z",
+  user: { login: "clawsweeper[bot]" },
+  body: [
+    "ClawSweeper status: review started.",
+    \`<!-- clawsweeper-review-status:started item=357 sha=\${newerHead} started_at=2026-07-23T13:00:02.000Z lease_expires_at=\${leaseExpiresAt} owner=github-run-222-1 v=1 -->\`,
+    "<!-- clawsweeper-review-lease item=357 -->",
+  ].join("\\n"),
+};
+const comments = () => existsSync(postedPath)
+  ? [JSON.parse(readFileSync(postedPath, "utf8")), newerLease]
+  : [];
+if (args[0] === "api" && path === "repos/openclaw/openclaw/issues/357") {
+  console.log(JSON.stringify({
+    number: 357,
+    title: "Fence stale review cleanup",
+    html_url: "https://github.com/openclaw/openclaw/pull/357",
+    created_at: "2026-07-23T12:00:00Z",
+    updated_at: "2026-07-23T13:00:00Z",
+    closed_at: null,
+    state: "open",
+    locked: false,
+    active_lock_reason: null,
+    author_association: "CONTRIBUTOR",
+    user: { login: "reporter" },
+    labels: [],
+    pull_request: {}
+  }));
+} else if (args[0] === "api" && path === "repos/openclaw/openclaw/pulls/357") {
+  const count = existsSync(pullCountPath) ? Number(readFileSync(pullCountPath, "utf8")) : 0;
+  writeFileSync(pullCountPath, String(count + 1));
+  console.log(JSON.stringify({ head: { sha: count < 2 ? staleHead : newerHead } }));
+} else if (args[0] === "api" && path.startsWith("repos/openclaw/openclaw/issues/357/comments") && !args.includes("--method")) {
+  const value = comments();
+  console.log(JSON.stringify(args.includes("--slurp") ? [value] : value));
+} else if (args[0] === "api" && path === "repos/openclaw/openclaw/issues/357/comments" && args.includes("POST")) {
+  const body = JSON.parse(readFileSync(args[args.indexOf("--input") + 1], "utf8")).body;
+  const lease = {
+    id: 9991,
+    html_url: "https://github.com/openclaw/openclaw/pull/357#issuecomment-9991",
+    created_at: "2026-07-23T13:00:01Z",
+    updated_at: "2026-07-23T13:00:01Z",
+    user: { login: "clawsweeper[bot]" },
+    body
+  };
+  writeFileSync(postedPath, JSON.stringify(lease));
+  console.log(JSON.stringify(lease));
+} else if (args[0] === "api" && /repos\\/openclaw\\/openclaw\\/issues\\/comments\\/\\d+$/.test(path) && args.includes("DELETE")) {
+  appendFileSync(deleteLogPath, path + "\\n");
+  console.log("");
+} else {
+  console.error("unexpected gh args", JSON.stringify(args));
+  process.exit(1);
+}
+`,
+      "utf8",
+    );
+    writeFileSync(
+      curlPath,
+      `#!/usr/bin/env node
+require("node:fs").appendFileSync(${JSON.stringify(curlLogPath)}, process.argv.slice(2).join(" ") + "\\n");
+process.stdout.write("200");
+`,
+      "utf8",
+    );
+    chmodSync(curlPath, 0o755);
+
+    const result = spawnSync(
+      process.execPath,
+      [
+        CLI,
+        "reserve-review-lease",
+        "--target-repo",
+        "openclaw/openclaw",
+        "--item-number",
+        "357",
+        "--review-timeout-ms",
+        "600000",
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...mockGhBinEnv(ghPath, binDir),
+          GITHUB_RUN_ID: "111",
+          GITHUB_RUN_ATTEMPT: "1",
+          EXACT_REVIEW_QUEUE_URL: "https://queue.example.invalid",
+          EXACT_REVIEW_ITEM_KEY: "openclaw/openclaw#357",
+          EXACT_REVIEW_LEASE_ID: "lease-357",
+          EXACT_REVIEW_LEASE_REVISION: "1",
+          EXACT_REVIEW_CLAIM_GENERATION: "1",
+        },
+      },
+    );
+
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /review revision changed while reserving #357/);
+    assert.deepEqual(readFileSync(deleteLogPath, "utf8").trim().split("\n"), [
+      "repos/openclaw/openclaw/issues/comments/9991",
+    ]);
+    assert.match(readFileSync(curlLogPath, "utf8"), new RegExp(`source_head_sha.*${staleHead}`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("managed local review checkout fetches the pull request ref", () => {
   const root = mkdtempSync(join(tmpdir(), "cmd-"));
   const origin = join(root, "origin.git");
@@ -142,7 +459,7 @@ test("managed local review checkout fetches the pull request ref", () => {
       pullSha,
     );
     assert.ok(existsSync(join(targetDir, "feature.txt")));
-    assert.equal(readFileSync(join(targetDir, "feature.txt"), "utf8"), "from pr\n");
+    assert.equal(normalizeLf(readFileSync(join(targetDir, "feature.txt"), "utf8")), "from pr\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -167,7 +484,7 @@ test("local exact review explains when GitHub item is not open", () => {
     execFileSync("git", ["push", "origin", "main"], { cwd: targetDir, stdio: "ignore" });
 
     mkdirSync(binDir);
-    const ghPath = join(binDir, "gh");
+    const ghPath = join(binDir, "gh.js");
     writeFileSync(
       ghPath,
       `#!/usr/bin/env node
@@ -217,7 +534,11 @@ process.exit(1);
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` },
+        env: {
+          ...process.env,
+          ...mockGhBinEnv(ghPath),
+          PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
       },
     );
 
@@ -235,12 +556,14 @@ process.exit(1);
   }
 });
 
-test("local exact review labels Codex failures without a stack trace", () => {
+test("local exact review selects PATH Codex instead of the Desktop app binary", () => {
   const root = mkdtempSync(join(tmpdir(), "cmd-"));
   const origin = join(root, "origin.git");
   const targetDir = join(root, "target");
   const artifactDir = join(root, "artifacts");
   const binDir = join(root, "bin");
+  const localAppData = join(root, "local-app-data");
+  const codexMarker = join(root, "path-codex-ran.txt");
   try {
     execFileSync("git", ["init", "--bare", origin], { stdio: "ignore" });
     execFileSync("git", ["init", targetDir], { stdio: "ignore" });
@@ -254,7 +577,7 @@ test("local exact review labels Codex failures without a stack trace", () => {
     execFileSync("git", ["push", "origin", "main"], { cwd: targetDir, stdio: "ignore" });
 
     mkdirSync(binDir);
-    const ghPath = join(binDir, "gh");
+    const ghPath = join(binDir, "gh.js");
     writeFileSync(
       ghPath,
       `#!/usr/bin/env node
@@ -305,6 +628,16 @@ if (args[0] === "api" && args[1] === "repos/openclaw/openclaw/pulls/96221") {
   console.log(JSON.stringify(pull));
   process.exit(0);
 }
+if (
+  args[0] === "api" &&
+  (
+    args[1].startsWith("repos/openclaw/openclaw/pulls/96221/reviews") ||
+    args[1].startsWith("repos/openclaw/openclaw/pulls/96221/comments")
+  )
+) {
+  console.log(JSON.stringify([[]]));
+  process.exit(0);
+}
 if (args[0] === "api" && args[1] === "-i" && args[2].startsWith("repos/openclaw/openclaw/issues/96221/timeline")) {
   process.stdout.write("HTTP/2 200\\nlink: <https://api.github.test?page=1>; rel=\\"last\\"\\n\\n[]");
   process.exit(0);
@@ -319,9 +652,13 @@ process.exit(1);
     chmodSync(ghPath, 0o755);
 
     const codexPath = join(binDir, "codex");
+    const desktopCodexDir = join(localAppData, "OpenAI", "Codex", "bin");
+    mkdirSync(desktopCodexDir, { recursive: true });
+    writeFileSync(join(desktopCodexDir, "codex.exe"), "");
     writeFileSync(
       codexPath,
       `#!/usr/bin/env node
+require("node:fs").writeFileSync(${JSON.stringify(codexMarker)}, "path\\n");
 process.stdin.resume();
 process.stdin.on("end", () => process.exit(1));
 `,
@@ -343,7 +680,12 @@ process.stdin.on("end", () => process.exit(1));
       ],
       {
         encoding: "utf8",
-        env: { ...process.env, PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}` },
+        env: {
+          ...process.env,
+          LOCALAPPDATA: localAppData,
+          ...mockGhBinEnv(ghPath),
+          PATH: `${binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
       },
     );
 
@@ -359,7 +701,12 @@ process.stdin.on("end", () => process.exit(1));
     assert.doesNotMatch(result.stderr, /Review complete/);
     assert.doesNotMatch(result.stderr, /\n\s+at /);
     assert.match(readFileSync(join(artifactDir, "96221.md"), "utf8"), /review_status: failed/);
+    assert.equal(readFileSync(codexMarker, "utf8"), "path\n");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+function normalizeLf(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}

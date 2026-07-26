@@ -93,7 +93,7 @@ export function runCodexProcess(options: {
       optionsPath,
       JSON.stringify({
         args: [...options.args],
-        command: options.command ?? codexProcessCommand(options.env),
+        command: options.command ?? codexProcessCommand(options.env, process.platform, options.cwd),
         timeoutMs: options.timeoutMs,
         resultPath,
         stdoutPath,

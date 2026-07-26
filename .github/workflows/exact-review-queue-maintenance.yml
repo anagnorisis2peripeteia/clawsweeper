@@ -1,0 +1,53 @@
+name: Maintain exact review queue
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: "Apply one bounded pass (false runs a dry-run)"
+        required: true
+        type: boolean
+        default: false
+      passes:
+        description: "Deprecated compatibility input; accepted but clamped to one pass"
+        required: true
+        type: string
+        default: "1"
+
+concurrency:
+  group: exact-review-queue-maintenance
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      EXACT_REVIEW_QUEUE_URL: ${{ vars.CLAWSWEEPER_EXACT_REVIEW_QUEUE_URL || 'https://clawsweeper.openclaw.ai' }}
+      CLAWSWEEPER_WEBHOOK_SECRET: ${{ secrets.CLAWSWEEPER_WEBHOOK_SECRET }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          filter: blob:none
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          build-script: build:repair
+
+      - name: Preview or reconcile historical publication lineages
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          PASSES: ${{ inputs.passes }}
+        run: |
+          args=(--max-items 100)
+          if [[ "$EXECUTE" == "true" ]]; then
+            args+=(--apply)
+          fi
+          args+=(--passes "$PASSES")
+          pnpm run --silent repair:exact-review-queue-maintenance -- "${args[@]}"

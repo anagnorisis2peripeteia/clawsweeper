@@ -9,6 +9,8 @@ turns narrow trusted findings into guarded repair or automerge work.
 The current production targets are `openclaw/openclaw`, `openclaw/clawhub`, and
 self-review for `openclaw/clawsweeper`.
 
+Project vision and boundaries: [`VISION.md`](VISION.md)
+
 The OpenClaw-hosted ClawSweeper instance is not a public review service and does
 not provide free reviews for third-party repositories. If you want ClawSweeper
 for your own project, fork this repository, deploy it in your own organization,
@@ -72,7 +74,8 @@ For open issues with complete, current kept-open reviews, ClawSweeper also
 projects selected structured review conclusions into advisory GitHub labels for
 maintainer filtering and project views. These labels expose states such as
 current-main reproduction, source reproduction, linked open PRs, queueable
-fixes, missing info, and product/security review needs. They are advisory only
+fixes, verified small bugs suitable for `good first issue`, missing info, and
+product/security review needs. They are advisory only
 and do not trigger repair, merge, or close behavior. Label-only syncs record
 `labels_synced_at` in the durable report so GitHub `updated_at` changes caused
 by ClawSweeper-owned label writes do not look like fresh target-side activity to
@@ -86,6 +89,15 @@ paired issue/PR state, snapshot drift, and repository profile rules before
 commenting or closing anything. Closed or already-closed reports move to
 `records/<repo-slug>/closed/<number>.md`; reopened archived items move back to
 `items/` as stale work.
+
+Apply and artifact replay also maintain Codex-authored decision packet JSON at
+`records/<repo-slug>/decision-packets/<number>.json` for reports that need a
+maintainer ruling. Codex supplies the exact question, rationale, options,
+recommendation, and likely owner as structured review output. Deterministic
+code validates that intent, persists it, refreshes item state, and removes stale
+packets; labels and report prose do not reconstruct the decision. Pass
+`--decision-packets-dir` to write those packet files somewhere other than the
+profile's default records directory.
 
 Generated state lives on the `state` branch of `openclaw/clawsweeper-state`:
 durable `records/`, `jobs/`, `results/`, audit output, workflow status JSON,
@@ -155,6 +167,10 @@ ClawSweeper may propose a close only when the item is clearly one of these:
 - better suited for ClawHub skill/plugin work than core
 - duplicate or superseded by a canonical issue/PR
 - low-signal pull request whose branch is mostly unrelated or unmergeable churn
+- external low-rated pull request whose requested real-behavior proof never
+  arrived and whose branch has been idle for 14+ days
+- external pull request abandoned for 30+ days as a draft, waiting on its
+  author, or failing checks on its live head
 - concrete but not actionable in this source repo
 - incoherent enough that no action can be taken
 - stale issue older than 60 days with too little data to verify
@@ -213,11 +229,13 @@ Common commands:
   current state: `👀` for acknowledgement, `🧹` for review, `🔧` for repair, and
   `✅` for completed/paused work.
 - Freeform `@clawsweeper ...` mentions and explicit `ask ...` questions dispatch
-  the maintainer-only assist lane. Assist runs the internal model with low reasoning, a
-  120-second per-item timeout, and its own five-job cap. It posts a separate
+  the maintainer-only assist lane. Assist runs the internal model with high reasoning,
+  a 120-second per-item timeout, and its own five-job cap. It posts a separate
   non-durable answer comment and never edits the durable ClawSweeper review
   comment, closes, merges, labels, pushes, repairs, or emits review/apply
-  markers.
+  markers. The model job has read-only GitHub access and emits a bounded artifact;
+  a fresh trusted publisher validates its workflow request, target revision, PR
+  head, and source comment before minting a narrow comment-write token.
 - `visualize [lens]` dispatches the read-only visual assist lane and posts or
   updates a marker-backed visual brief comment for the requested lens.
 - `fix ci`, `address review`, and `rebase` dispatch the repair worker only for
@@ -301,6 +319,12 @@ proof, supplied-but-not-sufficient proof, mock-only proof, and proof label
 mismatches. See
 [`docs/pr-proof-triage-dashboard.md`](docs/pr-proof-triage-dashboard.md).
 
+The unlisted OpenClaw Bay experiment at `/bay-demo` renders the same read-only
+operational status as an animated shoreline. It is public to anyone with the
+URL, deliberately absent from dashboard navigation, and adds no browser-to-GitHub
+requests or new GitHub query path. See
+[`docs/openclaw-bay-demo.md`](docs/openclaw-bay-demo.md).
+
 The optional proof-nudge lane can dry-run or post polite reminder comments for
 open PRs that remain blocked on `triage: needs-real-behavior-proof`. It uses
 comment-body cooldown markers, never closes PRs, and keeps scheduled operation
@@ -312,6 +336,12 @@ strictly bounded class of technically correct, well-proven external feature PRs
 that still lack maintainer-confirmed direction. Live maintainer signals and
 automation opt-ins veto apply. See
 [`docs/product-direction-close-policy.md`](docs/product-direction-close-policy.md).
+
+The default-off per-author PR-budget policy gradually trims an external
+author's oldest lowest-signal PRs only after apply verifies the live repository
+count, seven-day inactivity, rating/proof eligibility, protected labels, and
+maintainer engagement. See
+[`docs/author-pr-budget-close-policy.md`](docs/author-pr-budget-close-policy.md).
 
 ## How It Works
 
@@ -377,7 +407,9 @@ still valid.
 
 - Updates the single marker-backed Codex automated review comment in place.
 - Closes only unchanged high-confidence proposals.
-- Reuses the review comment when closing; no duplicate close comment.
+- Keeps the durable review comment. Applied PR closes also post one idempotent,
+  marker-backed close receipt; issue closes currently leave the durable review
+  as ClawSweeper's sole comment.
 - Moves closed or already-closed reports to
   `records/<repo-slug>/closed/<number>.md`.
 - Moves reopened archived reports back to the repo’s `items/` folder as stale.
@@ -386,21 +418,50 @@ still valid.
 Apply wakes every 15 minutes, no-ops when there are no unchanged
 high-confidence close proposals, and narrows scheduled runs to the currently
 eligible proposal list so idle runs do not scan unrelated keep-open records.
-It defaults to all item kinds, no age floor, a 2-second close delay, and 5
-fresh closes per checkpoint, with a hard cap of 5 to keep each GitHub App
+It defaults to all item kinds, no age floor, a 2-second close delay, and 20
+fresh closes per checkpoint, with a hard cap of 20 to keep each GitHub App
 token within its lifetime. After a checkpoint closes at least one item, it
 queues another apply run with a fresh token; a saturated scan that closes
 nothing stops and waits for the next scheduled tick instead of self-dispatching
 indefinitely.
 
-Exact event runs skip the bulk planner, shard matrix, artifact upload, and
-separate publish job. They still use the same review and apply code paths, but
-only for the selected item number and only with immediate-safe reasons enabled
-by default: `implemented_on_main`, `duplicate_or_superseded`, and
-`low_signal_unmergeable_pr`.
+Apply health keeps the scheduler-admitted `apply_ready_count` separate from the
+full promotion backlog, cooldown-eligible probes, proof-required work, guarded
+retries, and inconsistent records. Its cycle estimate covers work actionable in
+the current scheduler window rather than presenting every probe as immediately
+closable.
+
+Exact event runs skip the bulk planner and shard matrix. The read-only reviewer
+handles only the selected item, uploads a hash-bound GitHub Actions artifact,
+enqueues a separate durable publication lease, and then releases its review
+lease without checking out or pushing the state repository. The queue retries
+publication independently, so a cancelled publisher does not rerun Codex. A
+Durable Object-bounded publisher lane (24 base, adaptively capped at 48)
+validates each artifact's workflow run, queue tuple, target, decision digest,
+file inventory, sizes, and SHA-256 hashes before it receives write tokens.
+Publication leases reserve the bounded publisher lane's maximum queue wait;
+terminal-run reconciliation releases dead dispatches early. The publisher then
+uses the same review and apply paths with only the
+immediate-safe reasons enabled by default:
+`implemented_on_main`, `duplicate_or_superseded`, and
+`low_signal_unmergeable_pr`. A stale tuple now terminates as `superseded`
+instead of retrying, while permanent failures enter a bounded dead-letter store
+after their confirmation retries. Artifacts remain available for 90 days; three
+confirmed unavailable-artifact attempts queue one fresh exact review instead of
+waiting for the retention deadline.
+
+Deterministic terminal and remain-open outcomes flow through the same publisher.
+Ordinary synced verdicts publish their exact durable comment, then queue an
+executing target-wide comment-router scan. Exact publishers use the bounded
+Durable Object lane while batch publishers remain per-target serialized. Direct
+exact-event viable-issue
+implementation dispatch stays disabled; the bounded broad publish/backfill lane
+owns that separately revalidated intake. Publication still does not claim an
+atomic state-publish-and-route boundary.
 `stale_insufficient_info` issue reports and `mostly_implemented_on_main` PR
 reports are never applied to young items; apply requires those reports to be at
-least 60 days old unless a manual run explicitly changes the threshold.
+least 60 days old unless a manual run explicitly changes the threshold. A stale
+issue also stays open when a non-bot comment was posted in the last 60 days.
 
 The external state dashboard is fleet-scoped. Each configured repository gets
 its own record folder, status JSON, audit state, cadence counts, and recent
@@ -458,6 +519,9 @@ Repair internals are documented in
 [`docs/repair/README.md`](docs/repair/README.md), and the automerge state
 machine is documented in
 [`docs/repair/automerge-flow.md`](docs/repair/automerge-flow.md).
+The production automerge command chain can be validated before merge with the
+local-container, CI, and Crabbox harness in
+[`docs/repair/automerge-e2e.md`](docs/repair/automerge-e2e.md).
 
 ### Commit Review Lane
 
@@ -557,7 +621,7 @@ source ~/.profile
 corepack enable
 pnpm install
 pnpm run build
-pnpm run plan -- --target-repo openclaw/openclaw --batch-size 5 --shard-count 22 --max-pages 250 --codex-model internal --codex-reasoning-effort high
+pnpm run plan -- --target-repo openclaw/openclaw --batch-size 5 --shard-count 89 --max-pages 250 --codex-model internal --codex-reasoning-effort high
 pnpm run review -- --target-repo openclaw/openclaw --target-dir ../openclaw --batch-size 5 --max-pages 250 --artifact-dir artifacts/reviews --codex-model internal --codex-reasoning-effort high --codex-timeout-ms 600000
 pnpm run apply-artifacts -- --target-repo openclaw/openclaw --artifact-dir artifacts/reviews --skip-dashboard
 pnpm run audit -- --target-repo openclaw/openclaw --max-pages 250 --sample-limit 25 --update-dashboard
@@ -591,6 +655,30 @@ pnpm run review -- --local-only \
   --item-number 123 \
   --target-dir ../target-checkout
 ```
+
+Pre-submission committed-range review uses the same full proof-aware review
+without requiring an open GitHub item. From the clean checkout containing the
+branch to review:
+
+```bash
+pnpm run review -- --local-range \
+  --target-repo openclaw/clawsweeper \
+  --base origin/main
+```
+
+Without `--target-dir`, `--local-range` reviews the checkout where the command
+was invoked. Pass `--target-dir <path>` when invoking ClawSweeper from a
+different checkout. The range is `merge-base(<base>, HEAD)..HEAD`, includes
+committed work only, and refuses a dirty working tree. `--body-file` can supply
+the proposed PR body and `--additional-policy` can layer an extra local policy.
+
+This mode withholds GitHub token variables, points `gh` at an empty config
+directory inside the run artifacts, disables Codex web search, skips host-side
+URL/media preprocessing, and makes no GitHub reads or writes. It is not
+air-gapped: the Codex model invocation still uses its configured network
+service. Reports use a unique
+`.git/clawsweeper/reviews/local-range-<time>-<pid>/` directory so the default
+run leaves the checkout clean. `--artifact-dir` overrides that location.
 
 Read the report at `artifacts/local-review-<number>/<number>.md`. Key fields are
 `review_status`, `main_sha`, `pull_head_sha`, `decision`, `confidence`, and
@@ -670,13 +758,13 @@ default, subject to the selected repository profile; pass `target_repo`,
 `apply_kind=issue`, or `apply_kind=pull_request` to narrow a manual run.
 
 Scheduled runs cover the configured product profiles. `openclaw/openclaw` runs
-normal backfill every 5 minutes with up to 12 review shards when the system is
+normal backfill every 5 minutes with up to 89 review shards when the system is
 quiet; `openclaw/clawhub` runs on offset review/apply/audit crons so its reports
 live under `records/openclaw-clawhub/` without colliding with default repo
 records. `openclaw/clawsweeper` has a scheduled read-only audit row and is
 available for manual and event self-review smoke tests. Broad hot-intake sweeps
-cap scheduled fan-out at 11 one-item shards per run when quiet; manual normal
-backfill can use up to 22 shards, while exact event reviews still use one shard.
+cap scheduled fan-out at 44 one-item shards per run when quiet; manual normal
+backfill can use up to 89 shards, while exact event reviews still use one shard.
 Normal review, hot intake, and commit review are
 background lanes, so they shrink automatically while repair or exact-item work
 is active. Throughput defaults live in
@@ -685,18 +773,21 @@ is active. Throughput defaults live in
 ### Worker Budget
 
 ClawSweeper has one main capacity knob:
-`config/automation-limits.json` -> `workers.max`. The current value is `32`.
-Lane limits are derived from that number: normal review defaults to 22 shards
-for manual/backstop runs, scheduled normal review gets up to 12 after reserves,
-hot intake up to 11 shards, commit review 1 commit per page, and existing
-repair/issue implementation lanes use 40% of `workers.max`, currently 12 live
+`config/automation-limits.json` -> `workers.max`. The current value is `128`.
+This is a Codex worker budget, not a GitHub Actions runner limit. Deterministic
+exact-review publishers, comment routers, and lease reconcilers are
+control-plane workflows and do not consume these 128 slots.
+Lane limits are derived from that number: normal review defaults to 89 shards
+for manual/backstop and scheduled runs, hot intake up to 44 shards, commit
+review 6 commits per page, and existing repair/issue implementation lanes use
+40% of `workers.max`, currently 51 live
 workers. Imported gitcrawl cluster repair allows 2 live workers by default.
 Exact-item review, repair, and issue implementation are priority work; normal
 review, hot intake, and commit review are background work and automatically
 yield when priority work is active. Exact-item runs use a durable Worker queue
-that coalesces item deliveries, leases at most 20 concurrent reviews, and admits
-up to 16 active exact reviews per target repository. Other lanes retain the
-checked-in 32-worker scheduling model.
+that coalesces item deliveries, leases at most 64 concurrent reviews, and admits
+up to 60 active exact reviews per target repository. Other lanes retain the
+checked-in 128-worker scheduling model.
 Use `workers.max` first when turning total Codex usage up or down; use
 `lanes.repair.cluster_max_live_runs` to tune the imported legacy cluster-repair
 lane separately, and individual environment overrides only for temporary
@@ -724,7 +815,16 @@ pnpm run oxformat
 The `CI` GitHub Actions workflow uses the latest Node release and runs
 `pnpm run check` on pushes, pull requests, and manual dispatches. The check gate
 includes the full test suite, a strict changed-surface coverage threshold, and a
-full compiled-repo coverage ratchet.
+full compiled-repo coverage ratchet. It builds once, runs independent static and
+lint checks with bounded phase-level parallelism, and uses the full coverage run
+as the single source of complete test results. Standalone `test`, `test:repair`,
+and coverage commands still build their required outputs; their internal
+`*:no-build` variants are for the composed gate after `build:all`.
+
+Node test files are expanded by `scripts/run-node-tests.mjs` instead of the
+shell, so the same targets work on Linux, macOS, and Windows. The runner defaults
+to the smaller of the machine's available parallelism and 16, prints the chosen
+value, and accepts an explicit `--test-concurrency` override for diagnostics.
 
 ## GitHub Actions Setup
 
@@ -776,8 +876,9 @@ Required `clawsweeper` app permissions:
   source branches containing `.github/workflows/*` changes.
 - Actions: read/write on `openclaw/clawsweeper`, for run cancellation, manual
   dispatch, self-heal, and commit-review continuations.
-- Checks: write on target repositories when commit Check Runs should be
-  published.
+- Checks: read/write on target repositories, for structural cache state and
+  commit Check Run publication.
+- Commit statuses: read on target repositories, for structural cache state.
 
 Optional steerable Action setup:
 

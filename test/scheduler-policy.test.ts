@@ -2,14 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  appendFloorBackfillCandidateNumbersForTest,
+  appendFloorBackfillCandidates,
   hotIntakeRecencyMs,
   reviewPriority,
-  selectDueCandidateNumbersForTest,
+  selectDueCandidates,
   shouldReviewItem,
   shouldStopSaturatedPlanScan,
-} from "../dist/clawsweeper.js";
+} from "../dist/scheduler-policy.js";
 import { item } from "./helpers.ts";
+
+function schedulerCandidate(candidate) {
+  return {
+    item: candidate.item,
+    review: null,
+    priority: candidate.priority ?? reviewPriority(candidate.item, null),
+    reviewedAt: candidate.reviewedAt ?? 0,
+    nextDueAt: candidate.nextDueAt ?? 0,
+    bucket: candidate.bucket,
+  };
+}
+
+function selectedNumbers(due, limit, now) {
+  return selectDueCandidates(due.map(schedulerCandidate), limit, undefined, now).map(
+    (candidate) => candidate.item.number,
+  );
+}
+
+function backfilledNumbers(selected, backfill, activeFloor, capacity) {
+  return appendFloorBackfillCandidates(
+    selected.map(schedulerCandidate),
+    backfill.map(schedulerCandidate),
+    { activeFloor, capacity },
+  ).map((candidate) => candidate.item.number);
+}
 
 test("review policy changes force fresh complete reports back into planning", () => {
   const reviewedAt = new Date().toISOString();
@@ -330,7 +355,106 @@ test("normal scheduler reserves throughput for PR and older buckets", () => {
     },
   );
 
-  assert.deepEqual(selectDueCandidateNumbersForTest(due, 8, now), [1, 2, 3, 4, 101, 201, 301, 5]);
+  assert.deepEqual(selectedNumbers(due, 8, now), [1, 2, 3, 4, 101, 201, 301, 5]);
+});
+
+test("bulk-filed issues sort last while scheduler bucket priority stays intact", () => {
+  const now = Date.parse("2026-07-16T12:00:00Z");
+  const due = [
+    {
+      item: item({
+        number: 1,
+        kind: "issue",
+        createdAt: "2026-07-15T00:00:00Z",
+        labels: ["clawsweeper:bulk-filed"],
+      }),
+      bucket: "hot_issue",
+      priority: 0,
+      nextDueAt: 0,
+    },
+    {
+      item: item({ number: 2, kind: "issue", createdAt: "2026-07-15T00:00:00Z" }),
+      bucket: "hot_issue",
+      priority: 0,
+      nextDueAt: 100,
+    },
+    {
+      item: item({
+        number: 3,
+        kind: "pull_request",
+        createdAt: "2026-07-15T00:00:00Z",
+      }),
+      bucket: "hot_pull_request",
+      priority: 1,
+      nextDueAt: 0,
+    },
+  ];
+
+  assert.deepEqual(selectedNumbers(due, 3, now), [2, 1, 3]);
+  assert.deepEqual(selectedNumbers(due, 1, now), [2]);
+
+  const onlyBulkHotIssue = due.filter((candidate) => candidate.item.number !== 2);
+  assert.deepEqual(selectedNumbers(onlyBulkHotIssue, 1, now), [1]);
+
+  const overdueWeeklyIssues = [
+    {
+      item: item({
+        number: 10,
+        createdAt: "2026-04-01T00:00:00Z",
+        labels: ["clawsweeper:bulk-filed"],
+      }),
+      bucket: "weekly_issue",
+      priority: 6,
+      nextDueAt: 0,
+    },
+    {
+      item: item({ number: 11, createdAt: "2026-05-01T00:00:00Z" }),
+      bucket: "weekly_issue",
+      priority: 6,
+      nextDueAt: 100,
+    },
+  ];
+  assert.deepEqual(selectedNumbers(overdueWeeklyIssues, 1, now), [11]);
+});
+
+test("mixed-bucket weekly-overdue ordering is transitive and globally bulk-last", () => {
+  const now = Date.parse("2026-07-16T12:00:00Z");
+  const due = [
+    {
+      item: item({
+        number: 21,
+        createdAt: "2026-04-01T00:00:00Z",
+        labels: ["clawsweeper:bulk-filed"],
+      }),
+      bucket: "hot_issue",
+      priority: 0,
+    },
+    {
+      item: item({
+        number: 22,
+        createdAt: "2026-05-01T00:00:00Z",
+        labels: ["clawsweeper:bulk-filed"],
+      }),
+      bucket: "weekly_issue",
+      priority: 6,
+    },
+    {
+      item: item({ number: 23, createdAt: "2026-06-01T00:00:00Z" }),
+      bucket: "hot_issue",
+      priority: 0,
+    },
+    {
+      item: item({
+        number: 24,
+        kind: "pull_request",
+        createdAt: "2026-07-01T00:00:00Z",
+      }),
+      bucket: "daily_pull_request",
+      priority: 3,
+    },
+  ];
+
+  assert.deepEqual(selectedNumbers(due, due.length, now), [23, 24, 21, 22]);
 });
 
 test("normal scheduler prioritizes items already breaching weekly freshness", () => {
@@ -368,7 +492,7 @@ test("normal scheduler prioritizes items already breaching weekly freshness", ()
     },
   ];
 
-  assert.deepEqual(selectDueCandidateNumbersForTest(due, 3, now), [3, 2, 1]);
+  assert.deepEqual(selectedNumbers(due, 3, now), [3, 2, 1]);
 });
 
 test("weekly freshness preselection still fills remaining scheduler capacity", () => {
@@ -406,7 +530,7 @@ test("weekly freshness preselection still fills remaining scheduler capacity", (
     },
   );
 
-  assert.deepEqual(selectDueCandidateNumbersForTest(due, 7, now), [1, 2, 3, 4, 5, 7, 6]);
+  assert.deepEqual(selectedNumbers(due, 7, now), [1, 2, 3, 4, 5, 7, 6]);
 });
 
 test("normal scheduler can fill active floor from stale current reviews", () => {
@@ -442,11 +566,8 @@ test("normal scheduler can fill active floor from stale current reviews", () => 
     },
   ];
 
-  assert.deepEqual(
-    appendFloorBackfillCandidateNumbersForTest(selected, backfill, 3, 10),
-    [1, 10, 11],
-  );
-  assert.deepEqual(appendFloorBackfillCandidateNumbersForTest(selected, backfill, 3, 2), [1, 10]);
+  assert.deepEqual(backfilledNumbers(selected, backfill, 3, 10), [1, 10, 11]);
+  assert.deepEqual(backfilledNumbers(selected, backfill, 3, 2), [1, 10]);
 });
 
 test("normal scheduler can stop scanning once planned capacity is saturated", () => {

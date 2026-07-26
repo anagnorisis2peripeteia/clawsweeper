@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,7 +7,9 @@ import {
   isProtectedItem,
   parseGhJson,
   parseGhJsonLines,
+  parseGhJsonWithRetry,
   protectedLabels,
+  reviewAutomationMarkersFromReport,
   renderReviewCommentFromReport,
   reviewActionForDecision,
   shouldPlanItem,
@@ -21,6 +24,58 @@ import {
   parseCoAuthors,
 } from "../dist/commit-sweeper.js";
 import { closeDecision, git, item, reportFrontMatter } from "./helpers.ts";
+
+test("review prompt documents gated backlog close policies", () => {
+  const prompt = readFileSync(new URL("../prompts/review-item.md", import.meta.url), "utf8");
+  const sweepWorkflow = readFileSync(
+    new URL("../.github/workflows/sweep.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(prompt, /`unsponsored_feature_request`/);
+  assert.match(prompt, /reversible idea-archive park, not a rejection/);
+  assert.match(prompt, /label whose normalized name contains `security`/);
+  assert.match(prompt, /configured positive-reaction threshold automatically reopens it/);
+  assert.match(prompt, /commenting `@clawsweeper revive`/);
+  assert.match(prompt, /no human comment in the last 60 days/);
+  assert.match(prompt, /significantly outdated version or behavior/);
+  assert.match(prompt, /not cleanly mergeable \(merge conflicts\) on its current head/);
+  assert.match(prompt, /`author_pr_budget_exceeded`/);
+  assert.match(prompt, /Never propose this reason when the author open-PR count is unknown/);
+  assert.match(prompt, /default path is apply-side deterministic promotion/);
+  assert.match(prompt, /`stale_version_bug`/);
+  assert.match(prompt, /fresh current-version reproduction/);
+  assert.match(prompt, /`obsolete_fix_pr`/);
+  assert.match(prompt, /every touched path was substantially rewritten or removed/);
+  assert.match(prompt, /`bulkFiler\.detected`/);
+  assert.match(prompt, /extra duplicate scrutiny/);
+  assert.match(prompt, /Never route it to proof-nudge or automated fix-dispatch work/);
+  assert.match(prompt, /do not invent a bulk-filing close reason/);
+  assert.equal(
+    [...sweepWorkflow.matchAll(/CLAWSWEEPER_IDEA_REVIVAL_REACTIONS:.*\|\| '5'/g)].length,
+    2,
+  );
+});
+
+test("unsponsored feature issue proposals emit source-bound trusted close markers", () => {
+  const markers = reviewAutomationMarkersFromReport(
+    reportFrontMatter({
+      type: "issue",
+      number: 321,
+      decision: "close",
+      confidence: "high",
+      close_reason: "unsponsored_feature_request",
+      action_taken: "proposed_close",
+      item_updated_at: "2026-01-01T00:00:00Z",
+      reviewed_at: "2026-07-11T00:00:00Z",
+      item_source_revision: "0123456789abcdef",
+    }),
+  );
+  assert.match(markers, /clawsweeper-verdict:close/);
+  assert.match(markers, /clawsweeper-action:close-required/);
+  assert.match(markers, /reason=unsponsored_feature_request/);
+  assert.match(markers, /source_revision=0123456789abcdef/);
+  assert.doesNotMatch(markers, /needs-human/);
+});
 
 test("protected labels are normalized and only maintainer-only items stay plannable", () => {
   assert.deepEqual(protectedLabels(["Security", "bug", "maintainer", "SECURITY"]), [
@@ -47,6 +102,19 @@ test("parseGhJsonLines adds line number and command context to malformed JSONL e
     () => parseGhJsonLines('{"ok":true}\nnot-json\n', ["issue", "list", "--json", "number"]),
     /Failed to parse JSON line 2 from gh issue list --json:/,
   );
+});
+
+test("parseGhJsonWithRetry reloads malformed successful responses", () => {
+  const responses = ['{"items":', '{"items":[1]}'];
+  const retries: number[] = [];
+  const parsed = parseGhJsonWithRetry<{ items: number[] }>(
+    () => responses.shift() ?? "",
+    ["api", "repos/openclaw/openclaw/pulls/42/files"],
+    { onRetry: (_error, attempt) => retries.push(attempt) },
+  );
+
+  assert.deepEqual(parsed, { items: [1] });
+  assert.deepEqual(retries, [1]);
 });
 
 test("commit review reports use one canonical path per commit", () => {
@@ -151,6 +219,35 @@ test("protected labels block close proposals even for otherwise valid decisions"
   assert.equal(action.closeComment, "");
 });
 
+test("PR close-exemption labels produce a distinct guarded-open action", () => {
+  const cases = [
+    ["clawsweeper:human-review", "unconfirmed_product_direction", "product-direction"],
+    ["clawsweeper:manual-only", "stalled_unproven_pr", "stalled-unproven"],
+    ["clawsweeper:automerge", "abandoned_pr", "abandoned-PR"],
+    ["clawsweeper:autofix", "stalled_unproven_pr", "stalled-unproven"],
+  ] as const;
+
+  for (const [label, closeReason, reasonText] of cases) {
+    const pr = item({
+      kind: "pull_request",
+      url: "https://github.com/openclaw/openclaw/pull/123",
+      labels: [label],
+    });
+    const validation = validateCloseDecision(pr, closeDecision({ closeReason }));
+    assert.equal(validation.ok, false, label);
+    assert.equal(validation.actionTaken, "skipped_close_exempt_label", label);
+    assert.match(validation.reason, new RegExp(`${label} exempts this PR from ${reasonText}`));
+
+    const action = reviewActionForDecision({
+      item: pr,
+      decision: closeDecision({ closeReason }),
+      git,
+    });
+    assert.equal(action.actionTaken, "skipped_close_exempt_label", label);
+    assert.equal(action.closeComment, "", label);
+  }
+});
+
 test("verified fixed maintainer items can become close proposals", () => {
   const validation = validateCloseDecision(item({ labels: ["maintainer"] }), closeDecision());
   assert.deepEqual(validation, { ok: true });
@@ -186,7 +283,7 @@ test("review actions only propose valid closes and never apply directly", () => 
     item: item(),
     decision: closeDecision(),
     git,
-    runtime: { model: "gpt-5.5", reasoningEffort: "high" },
+    runtime: { model: "gpt-5.6-sol", reasoningEffort: "high" },
   });
   assert.equal(action.actionTaken, "proposed_close");
   assert.match(action.closeComment, /Thanks for the context here/);
@@ -210,7 +307,7 @@ test("review actions only propose valid closes and never apply directly", () => 
   assert.match(action.closeComment, /@bob/);
   assert.doesNotMatch(action.closeComment, /role: recent maintainer/);
   assert.match(action.closeComment, /role: recent area contributor/);
-  assert.match(action.closeComment, /Codex review notes: model gpt-5\.5, reasoning high;/);
+  assert.match(action.closeComment, /Codex review notes: model gpt-5\.6-sol, reasoning high;/);
 });
 
 test("review actions render deterministic close comments when model close comment is empty", () => {
@@ -219,7 +316,7 @@ test("review actions render deterministic close comments when model close commen
     item: item(),
     decision,
     git,
-    runtime: { model: "gpt-5.5", reasoningEffort: "high" },
+    runtime: { model: "gpt-5.6-sol", reasoningEffort: "high" },
   });
 
   assert.equal(action.actionTaken, "proposed_close");
@@ -247,7 +344,7 @@ test("close comments reference high-confidence merged fixing PRs", () => {
       },
     }),
     git,
-    runtime: { model: "gpt-5.5", reasoningEffort: "high" },
+    runtime: { model: "gpt-5.6-sol", reasoningEffort: "high" },
   });
 
   assert.equal(action.actionTaken, "proposed_close");
@@ -262,29 +359,38 @@ test("close comments reference high-confidence merged fixing PRs", () => {
 });
 
 test("commit PR lookup selects the newest merged pull request", () => {
-  const fixedPullRequest = fixedPullRequestFromCommitPullsForTest([
-    {
-      number: 455,
-      html_url: "https://github.com/openclaw/openclaw/pull/455",
-      title: "fix: older candidate",
-      merged: true,
-      merged_at: "2026-04-27T12:00:00Z",
-      merge_commit_sha: "1111111111111111",
-    },
-    {
-      number: 456,
-      html_url: "https://github.com/openclaw/openclaw/pull/456",
-      title: "fix: wire the shell check",
-      merged_at: "2026-04-28T12:00:00Z",
-      merge_commit_sha: "fedcba9876543210",
-    },
-    {
-      number: 457,
-      html_url: "https://github.com/openclaw/openclaw/pull/457",
-      title: "open follow-up",
-      merged: false,
-    },
-  ]);
+  const fixedPullRequest = fixedPullRequestFromCommitPullsForTest(
+    [
+      {
+        number: 455,
+        html_url: "https://github.com/openclaw/openclaw/pull/455",
+        title: "fix: older candidate",
+        merged: true,
+        merged_at: "2026-04-27T12:00:00Z",
+        merge_commit_sha: "1111111111111111",
+        body: "Fixes openclaw/openclaw#123",
+        base: { ref: "main" },
+      },
+      {
+        number: 456,
+        html_url: "https://github.com/openclaw/openclaw/pull/456",
+        title: "fix: wire the shell check",
+        merged_at: "2026-04-28T12:00:00Z",
+        merge_commit_sha: "fedcba9876543210",
+        body: "Resolves https://github.com/openclaw/openclaw/issues/123",
+        base: { ref: "main" },
+      },
+      {
+        number: 457,
+        html_url: "https://github.com/openclaw/openclaw/pull/457",
+        title: "open follow-up",
+        merged: false,
+        body: "Closes #123",
+        base: { ref: "main" },
+      },
+    ],
+    123,
+  );
 
   assert.deepEqual(fixedPullRequest, {
     repo: "openclaw/openclaw",
@@ -296,6 +402,77 @@ test("commit PR lookup selects the newest merged pull request", () => {
     confidence: "high",
     source: "GitHub commit PR lookup",
   });
+});
+
+test("commit PR lookup rejects unrelated closing references at the claimed fixed SHA", () => {
+  const fixedPullRequest = fixedPullRequestFromCommitPullsForTest(
+    [
+      {
+        number: 456,
+        html_url: "https://github.com/openclaw/openclaw/pull/456",
+        title: "fix: unrelated main-head change",
+        merged_at: "2026-04-28T12:00:00Z",
+        merge_commit_sha: "fedcba9876543210",
+        body: "Fixes #999",
+      },
+      {
+        number: 457,
+        html_url: "https://github.com/openclaw/openclaw/pull/457",
+        title: "fix: mentions the issue without closing it",
+        merged_at: "2026-04-29T12:00:00Z",
+        merge_commit_sha: "abcdef9876543210",
+        body: "Fixes #999; related to #123",
+      },
+      {
+        number: 458,
+        html_url: "https://github.com/openclaw/openclaw/pull/458",
+        title: "fix: closes the same number in another repository",
+        merged_at: "2026-04-30T12:00:00Z",
+        merge_commit_sha: "1234567890abcdef",
+        body: "Fixes other/repository#123",
+      },
+    ],
+    123,
+  );
+
+  assert.equal(fixedPullRequest, null);
+});
+
+test("commit PR lookup accepts an exact closing reference in the fixed commit message", () => {
+  const pull = {
+    number: 456,
+    html_url: "https://github.com/openclaw/openclaw/pull/456",
+    title: "fix: wire the shell check",
+    merged_at: "2026-04-28T12:00:00Z",
+    merge_commit_sha: "fedcba9876543210",
+    body: "Related to #123",
+    base: { ref: "main" },
+  };
+
+  assert.equal(
+    fixedPullRequestFromCommitPullsForTest([pull], 123, "Fixes other/repository#123"),
+    null,
+  );
+  assert.equal(fixedPullRequestFromCommitPullsForTest([pull], 123, "Fixes #999; see #123"), null);
+  assert.equal(
+    fixedPullRequestFromCommitPullsForTest([pull], 123, "Fixes openclaw/openclaw#123")?.number,
+    456,
+  );
+});
+
+test("commit PR lookup rejects closing references on a non-default branch", () => {
+  const pull = {
+    number: 456,
+    html_url: "https://github.com/openclaw/openclaw/pull/456",
+    title: "fix: backport the shell check",
+    merged_at: "2026-04-28T12:00:00Z",
+    merge_commit_sha: "fedcba9876543210",
+    body: "Fixes #123",
+    base: { ref: "release" },
+  };
+
+  assert.equal(fixedPullRequestFromCommitPullsForTest([pull], 123), null);
+  assert.equal(fixedPullRequestFromCommitPullsForTest([pull], 123, "Fixes #123"), null);
 });
 
 test("report-rendered close comments keep merged fixing PR provenance", () => {
@@ -317,7 +494,7 @@ test("report-rendered close comments keep merged fixing PR provenance", () => {
       fixed_sha: "abcdef1234567890",
       fixed_at: "2026-04-28T12:00:00Z",
       main_sha: "abcdef1234567890",
-      review_model: "gpt-5.5",
+      review_model: "gpt-5.6-sol",
       review_reasoning_effort: "high",
     })}
 
@@ -438,6 +615,8 @@ test("skill-only OpenClaw PRs can close through ClawHub with upload guidance", (
     summary:
       "The branch adds an optional bundled skill and does not change required core behavior.",
     changeSummary: "Adds bundled Higgsfield skill files under skills/higgsfield.",
+    systemContext: "",
+    architectureDiagram: "",
     bestSolution:
       "Publish the skill through ClawHub so it stays installable outside OpenClaw core.",
     itemCategory: "skill",
@@ -472,7 +651,11 @@ test("skill-only OpenClaw PRs can close through ClawHub with upload guidance", (
   assert.equal(action.actionTaken, "proposed_close");
   assert.match(action.closeComment, /ClawHub\.com/);
   assert.match(action.closeComment, /upload or publish/i);
-  assert.match(action.closeComment, /installable community skill/);
+  assert.match(action.closeComment, /ClawHub handoff/);
+  assert.match(action.closeComment, /skill, plugin, provider, channel, bundle, or MCP integration/);
+  assert.match(action.closeComment, /package metadata\/manifest/);
+  assert.match(action.closeComment, /will not open a ClawHub issue or PR/);
+  assert.match(action.closeComment, /installable ClawHub package/);
 });
 
 test("ClawHub policy allows main-implemented issue and PR close proposals", () => {

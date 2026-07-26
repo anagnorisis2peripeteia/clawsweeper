@@ -28,10 +28,42 @@ inputs:
     description: Optional newline-separated state paths to hydrate.
     required: false
     default: ""
+  persist-credentials:
+    description: Persist the checkout token in local git config for later state publication.
+    required: false
+    default: "true"
+  coordinator-url:
+    description: Durable FIFO coordinator used before any generated-state mutation.
+    required: false
+    default: https://clawsweeper.openclaw.ai
+  coordinator-enabled:
+    description: Enable durable FIFO admission; false is the explicit legacy-fence rollback mode.
+    required: false
+    default: "false"
+  coordinator-class:
+    description: Durable state-writer scheduling class
+    required: false
+    default: ordinary
+  records-source:
+    description: Record transport used by hydrate-state (git or worker).
+    required: false
+    default: git
+  records-url:
+    description: Worker base URL used when records-source is worker.
+    required: false
+    default: https://clawsweeper.openclaw.ai
+  records-repo-slugs:
+    description: Optional comma/newline-separated record repository slugs; defaults to state checkout directories.
+    required: false
+    default: ""
+  records-secret:
+    description: HMAC secret used only when records-source is worker.
+    required: false
+    default: ""
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@v7
       with:
         repository: openclaw/clawsweeper-state
         ref: state
@@ -40,17 +72,60 @@ runs:
         filter: ${{ inputs.filter }}
         fetch-depth: ${{ inputs.fetch-depth }}
         sparse-checkout: ${{ inputs.sparse-checkout }}
+        persist-credentials: ${{ inputs.persist-credentials }}
 
     - name: Export state root
       shell: bash
-      run: echo "CLAWSWEEPER_STATE_DIR=$GITHUB_WORKSPACE/${{ inputs.state-path }}" >> "$GITHUB_ENV"
+      env:
+        STATE_COORDINATOR_ENABLED: ${{ inputs.coordinator-enabled }}
+        STATE_COORDINATOR_URL: ${{ inputs.coordinator-url }}
+      # Keep immutable ledger server merges dormant until state publishers can
+      # fetch a merge-heavy shallow branch without hydrating its ancestry.
+      # The repository variable is the migration/rollback boundary. Once it is
+      # enabled, the publisher itself fails closed if its step-scoped credential
+      # or this URL is missing; checkout-only jobs never receive that credential.
+      run: |
+        case "$STATE_COORDINATOR_ENABLED" in
+          true) coordinator_enabled=1 ;;
+          false) coordinator_enabled=0 ;;
+          *) echo "coordinator-enabled must be true or false" >&2; exit 2 ;;
+        esac
+        {
+          echo "CLAWSWEEPER_STATE_DIR=$GITHUB_WORKSPACE/${{ inputs.state-path }}"
+          echo "CLAWSWEEPER_STATE_COORDINATOR_ENABLED=$coordinator_enabled"
+          echo "CLAWSWEEPER_STATE_COORDINATOR_URL=$STATE_COORDINATOR_URL"
+          echo "CLAWSWEEPER_STATE_COORDINATOR_CLASS=${{ inputs.coordinator-class }}"
+        } >> "$GITHUB_ENV"
 
     - uses: actions/setup-node@v6
       with:
         node-version: ${{ inputs.node-version }}
 
+    - name: Resolve Worker record snapshot cache key
+      id: records-snapshot
+      if: ${{ inputs.records-source == 'worker' }}
+      shell: bash
+      env:
+        CLAWSWEEPER_STATE_DIR: ${{ inputs.state-path }}
+        CLAWSWEEPER_RECORDS_URL: ${{ inputs.records-url }}
+        CLAWSWEEPER_RECORDS_REPO_SLUGS: ${{ inputs.records-repo-slugs }}
+        CLAWSWEEPER_RECORDS_SECRET: ${{ inputs.records-secret }}
+      run: node "${{ inputs.worktree-path }}/scripts/prepare-worker-record-cache.ts"
+
+    - name: Restore Worker record snapshot
+      if: ${{ inputs.records-source == 'worker' && steps.records-snapshot.outputs.available == 'true' }}
+      uses: actions/cache@v6
+      with:
+        path: ${{ inputs.worktree-path }}/.artifacts/worker-records-cache
+        key: clawsweeper-records-${{ runner.os }}-${{ steps.records-snapshot.outputs.cache-key }}
+
     - name: Hydrate generated state
       shell: bash
       env:
         CLAWSWEEPER_STATE_DIR: ${{ inputs.state-path }}
+        CLAWSWEEPER_RECORDS_SOURCE: ${{ inputs.records-source }}
+        CLAWSWEEPER_RECORDS_URL: ${{ inputs.records-url }}
+        CLAWSWEEPER_RECORDS_REPO_SLUGS: ${{ inputs.records-repo-slugs }}
+        CLAWSWEEPER_RECORDS_SECRET: ${{ inputs.records-secret }}
+        CLAWSWEEPER_RECORDS_CACHE_DIR: ${{ inputs.worktree-path }}/.artifacts/worker-records-cache
       run: node "${{ inputs.worktree-path }}/scripts/hydrate-state.ts" --state-dir "${{ inputs.state-path }}" --worktree "${{ inputs.worktree-path }}"

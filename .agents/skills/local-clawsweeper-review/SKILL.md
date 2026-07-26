@@ -1,6 +1,6 @@
 ---
 name: local-clawsweeper-review
-description: Run a local ClawSweeper issue or PR review before submitting or updating a pull request, including Codex CLI auth preflight, exact-item review command, artifact inspection, and no-GitHub-mutation safety. Use when asked to run local ClawSweeper, local clawsweeper review, pre-PR ClawSweeper check, or verify a PR with ClawSweeper locally.
+description: Run local ClawSweeper exact-item or committed-range reviews without GitHub mutation.
 ---
 
 # Local ClawSweeper Review
@@ -10,7 +10,8 @@ submitting, updating, or re-reviewing an issue or PR.
 
 ## Safety Boundary
 
-- Run only `pnpm run review -- --local-only` for the default workflow.
+- Run only `pnpm run review -- --local-only` for an existing GitHub item, or
+  `pnpm run review -- --local-range` for a pre-submission committed range.
 - Do not run `apply-artifacts`, `apply-decisions`, GitHub comment posting, or
   merge/autofix commands unless the user explicitly asks for that mutation.
 - Do not print `OPENAI_API_KEY`, `CODEX_API_KEY`, `CODEX_ACCESS_TOKEN`, GitHub
@@ -67,13 +68,18 @@ unset OPENAI_API_KEY
 ```
 
 If the wrong Codex binary is used, set `CODEX_BIN` in the local shell for that
-run. On Windows, the runner prefers the Codex app binary under
-`%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe` when `--local-only` is used.
+run. Otherwise, `--local-only` uses the first spawnable `codex` command on
+`PATH`, including on Windows. If no Windows PATH command is spawnable, it falls
+back to the installed Codex Desktop binary.
 
 ## Target Checkout Modes
 
 By default, an exact local PR review manages its own target checkout under
 `artifacts/local-review-<pr-number>/target`.
+
+By default, `--local-range` reviews the clean checkout where the command was
+invoked. It does not manage or switch that checkout. Pass `--target-dir` when
+the branch to review is elsewhere.
 
 Pass `--target-dir` when the operator wants to review an existing checkout or
 an issue.
@@ -116,6 +122,20 @@ pnpm run review -- --local-only \
   --target-dir <target-dir>
 ```
 
+To review committed branch work before a PR exists:
+
+```sh
+pnpm run review -- --local-range \
+  --target-repo <owner/repo> \
+  --base origin/main
+```
+
+The range is `merge-base(<base>, HEAD)..HEAD`. It must be clean and contain at
+least one commit beyond the base. This path withholds GitHub credentials,
+isolates cached `gh` auth, disables web search, and skips host-side URL/media
+preprocessing. It still calls the configured Codex model service; do not call it
+air-gapped or fully network-offline.
+
 The exact local command prints a human-readable progress summary by default. Add
 `--verbose` only when debugging checkout, selection, or Codex process details.
 
@@ -148,7 +168,7 @@ stderr or log summary.
 
 Before reporting success:
 
-- Confirm the command used `review --local-only`.
+- Confirm the command used `review --local-only` or `review --local-range`.
 - Confirm no GitHub comments, labels, merges, or apply commands were run.
 - Confirm the target checkout is still clean.
 - If findings exist, list the actionable items and the next local fix/test step.

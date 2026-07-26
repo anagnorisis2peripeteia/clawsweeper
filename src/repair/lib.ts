@@ -290,6 +290,7 @@ export function renderPrompt(
   parts.push(
     "## Required final output",
     "Return JSON matching `schema/repair/codex-result.schema.json` and nothing else.",
+    "If the fix has explicit files that must differ from the latest base in the final repaired tree, set `fix_artifact.repair_contract` to an object with `must_touch` and `match` (`any` or `all`). The executor checks this once against the final branch delta after review fixes and base sync. Set `repair_contract` to null when the expected edit surface is uncertain, only represented by incomplete `likely_files`, or the work is a pure deterministic rebase.",
   );
 
   return parts.join("\n\n");
@@ -459,10 +460,26 @@ export function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
+// CLAWSWEEPER_ALLOWED_OWNER is the one authoritative repair owner policy
+// (issue #604): a comma- or whitespace-separated owner list shared by intake
+// and every execution gate, so eligibility cannot diverge between them.
+export function allowedRepairOwners(allowedOwner?: string): string[] {
+  return String(allowedOwner ?? "")
+    .split(/[\s,]+/)
+    .map((owner) => owner.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+export function isAllowedRepairOwner(repo: string, allowedOwner?: string): boolean {
+  const owners = allowedRepairOwners(allowedOwner);
+  if (owners.length === 0) return true;
+  return owners.includes(String(repo.split("/")[0] ?? "").toLowerCase());
+}
+
 export function assertAllowedOwner(repo: string, allowedOwner?: string) {
   if (!allowedOwner) return;
-  const owner = repo.split("/")[0];
-  if (owner !== allowedOwner) {
+  if (!isAllowedRepairOwner(repo, allowedOwner)) {
+    const owner = repo.split("/")[0];
     throw new Error(`repo owner ${owner} does not match CLAWSWEEPER_ALLOWED_OWNER=${allowedOwner}`);
   }
 }

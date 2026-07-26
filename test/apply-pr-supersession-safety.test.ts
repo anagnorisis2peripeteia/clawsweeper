@@ -236,6 +236,8 @@ test("apply-decisions does not promote PRs superseded by no-proof linked pull re
               "--dry-run",
               "--apply-kind",
               "all",
+              "--apply-close-reasons",
+              "low_signal_unmergeable_pr",
               "--processed-limit",
               "3",
             ],
@@ -248,6 +250,10 @@ test("apply-decisions does not promote PRs superseded by no-proof linked pull re
     assert.equal(
       report.some((entry) => entry.action === "closed"),
       false,
+    );
+    assert.equal(
+      report.some((entry) => entry.action === "kept_open"),
+      true,
     );
     assert.doesNotMatch(JSON.stringify(report), /proof should not run/);
   } finally {
@@ -498,7 +504,7 @@ test("apply-decisions does not promote PRs superseded by section-only unsafe lin
   }
 });
 
-test("apply-decisions promotes PRs when live proof labels supersede stale linked reports", () => {
+test("apply-decisions promotes PRs when a proof-backed canonical PR is behind", () => {
   const root = mkdtempSync(tmpPrefix);
   try {
     const itemsDir = join(root, "items");
@@ -554,7 +560,7 @@ test("apply-decisions promotes PRs when live proof labels supersede stale linked
             html_url: "https://github.com/openclaw/openclaw/pull/400",
             state: "open",
             merged_at: null,
-            mergeable_state: "clean",
+            mergeable_state: "behind",
             labels: ["proof: sufficient"],
           },
         },

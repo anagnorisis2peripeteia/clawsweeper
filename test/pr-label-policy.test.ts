@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   featureShowcaseLabelsForTest,
+  goodFirstIssueLabelOptedOutForTest,
   impactLabelsForTest,
   impactLabelSchemeForTest,
   issueAdvisoryLabelsForTest,
@@ -196,12 +197,46 @@ test("ClawSweeper PR status labels preserve other label families", () => {
 });
 
 test("ClawSweeper PR status labels respect priority ordering", () => {
+  const automergeArmedLabel = prStatusLabelSchemeForTest().find(
+    (label) => label.kind === "automerge_armed",
+  )?.name;
+  assert.ok(automergeArmedLabel);
   assert.deepEqual(
     prStatusLabelsForTest(["clawsweeper:automerge"], {
       proofStatus: "missing",
       hasRecentReReviewRequest: true,
     }),
-    ["clawsweeper:automerge", "status: 🚀 automerge armed"],
+    ["clawsweeper:automerge", automergeArmedLabel],
+  );
+  assert.deepEqual(
+    prStatusLabelsForTest(
+      ["clawsweeper:automerge", "clawsweeper:human-review", automergeArmedLabel],
+      {
+        proofStatus: "missing",
+        hasRecentReReviewRequest: true,
+      },
+    ),
+    ["clawsweeper:automerge", "clawsweeper:human-review"],
+  );
+  assert.deepEqual(
+    prStatusLabelsForTest(
+      ["clawsweeper:automerge", "clawsweeper:merge-ready", automergeArmedLabel],
+      {
+        proofStatus: "missing",
+        hasRecentReReviewRequest: true,
+      },
+    ),
+    ["clawsweeper:automerge", "clawsweeper:merge-ready"],
+  );
+  assert.deepEqual(
+    prStatusLabelsForTest(
+      ["clawsweeper:automerge", "clawsweeper:manual-only", automergeArmedLabel],
+      {
+        proofStatus: "missing",
+        hasRecentReReviewRequest: true,
+      },
+    ),
+    ["clawsweeper:automerge", "clawsweeper:manual-only"],
   );
   assert.deepEqual(
     prStatusLabelsForTest([], {
@@ -469,6 +504,17 @@ test("ClawSweeper impact label scheme exposes owned impact labels", () => {
         "This issue is about auth, provider routing, model choice, or SecretRef resolution.",
     },
     {
+      name: "impact:ux-release-blocker",
+      color: "B60205",
+      description: "A non-technical user is blocked without terminal, logs, config, or support.",
+    },
+    {
+      name: "impact:ux-friction",
+      color: "FBCA04",
+      description:
+        "User-facing flow adds avoidable confusion or support burden without fully blocking progress.",
+    },
+    {
       name: "impact:other",
       color: "C5DEF5",
       description:
@@ -515,6 +561,47 @@ test("ClawSweeper impact label schema avoids unsupported response-format keyword
     };
   };
   assert.equal(schema.properties?.impactLabels?.uniqueItems, undefined);
+});
+
+test("review prompt and schema define UX release-blocker override", () => {
+  const schema = JSON.parse(reviewDecisionSchemaText()) as {
+    properties?: {
+      impactLabels?: {
+        description?: string;
+        items?: {
+          enum?: string[];
+        };
+      };
+      labelJustifications?: {
+        items?: {
+          properties?: {
+            label?: {
+              enum?: string[];
+            };
+          };
+        };
+      };
+    };
+  };
+  const schemaDescription = schema.properties?.impactLabels?.description ?? "";
+  const impactLabelEnum = schema.properties?.impactLabels?.items?.enum ?? [];
+  const justificationLabelEnum =
+    schema.properties?.labelJustifications?.items?.properties?.label?.enum ?? [];
+  const prompt = reviewPromptTemplate();
+
+  assert.match(prompt, /Apply this UX override before falling back to ordinary technical severity/);
+  assert.match(prompt, /non-technical first-time or community user/);
+  assert.match(prompt, /terminal commands, config edits, log inspection, manual file edits/);
+  assert.match(prompt, /override requires a\s+blocked user-facing path/);
+  assert.match(prompt, /Set `triagePriority: "P0"` and include `impact:ux-release-blocker`/);
+  assert.match(prompt, /Doctor button,\s+Fix button,\s+setup wizard,\s+inline\s+recovery/);
+  assert.match(schemaDescription, /UX override:/);
+  assert.match(schemaDescription, /non-technical first-time or community user/);
+  assert.match(schemaDescription, /Doctor button, Fix button, setup wizard, inline recovery/);
+  assert.ok(impactLabelEnum.includes("impact:ux-release-blocker"));
+  assert.ok(impactLabelEnum.includes("impact:ux-friction"));
+  assert.ok(justificationLabelEnum.includes("impact:ux-release-blocker"));
+  assert.ok(justificationLabelEnum.includes("impact:ux-friction"));
 });
 
 test("ClawSweeper merge-risk label scheme exposes PR-only merge warning labels", () => {
@@ -800,6 +887,180 @@ test("ClawSweeper issue advisory labels expose work-lane routing state", () => {
   );
 });
 
+test("bulk-filed issues never enter automated fix dispatch", () => {
+  const labels = issueAdvisoryLabelsForTest(["bug", "clawsweeper:bulk-filed"], {
+    type: "issue",
+    itemCategory: "bug",
+    reproductionStatus: "reproduced",
+    reproductionConfidence: "high",
+    implementationComplexity: "small",
+    autoImplementationCandidate: "strict_bug",
+    workCandidate: "queue_fix_pr",
+    workStatus: "candidate",
+    workConfidence: "high",
+    hasWorkShape: true,
+    hasWorkPrompt: true,
+    hasWorkValidation: true,
+  });
+
+  assert.equal(labels.includes("clawsweeper:bulk-filed"), true);
+  assert.equal(labels.includes("clawsweeper:no-new-fix-pr"), true);
+  assert.equal(labels.includes("clawsweeper:queueable-fix"), false);
+  assert.equal(labels.includes("good first issue"), false);
+  assert.equal(labels.includes("no-stale"), false);
+});
+
+test("ClawSweeper labels only small verified strict bugs as good first issues", () => {
+  const eligibleState = {
+    type: "issue",
+    itemCategory: "bug",
+    reproductionStatus: "reproduced",
+    reproductionConfidence: "high",
+    requiresNewFeature: false,
+    requiresNewConfigOption: false,
+    requiresProductDecision: false,
+    implementationComplexity: "small",
+    autoImplementationCandidate: "strict_bug",
+    securityReviewStatus: "not_applicable",
+    workCandidate: "queue_fix_pr",
+    workStatus: "candidate",
+    workConfidence: "high",
+    hasWorkShape: true,
+    hasWorkPrompt: true,
+    hasWorkValidation: true,
+    goodFirstIssueOptedOut: false,
+    locked: false,
+    hasOpenLinkedPullRequest: false,
+  };
+
+  assert.equal(
+    issueAdvisoryLabelsForTest(["bug"], eligibleState).includes("good first issue"),
+    true,
+  );
+
+  for (const ineligibleState of [
+    { reproductionStatus: "source_reproducible" },
+    { reproductionConfidence: "medium" },
+    { itemCategory: "feature" },
+    { requiresNewFeature: true },
+    { requiresNewConfigOption: true },
+    { requiresProductDecision: true },
+    { implementationComplexity: "medium" },
+    { autoImplementationCandidate: "none" },
+    { securityReviewStatus: "needs_attention" },
+    { workCandidate: "manual_review" },
+    { workStatus: "manual_review" },
+    { workConfidence: "medium" },
+    { hasWorkPrompt: false },
+    { hasWorkValidation: false },
+    { goodFirstIssueOptedOut: true },
+    { locked: true },
+    { hasOpenLinkedPullRequest: true },
+  ]) {
+    assert.equal(
+      issueAdvisoryLabelsForTest(["bug"], { ...eligibleState, ...ineligibleState }).includes(
+        "good first issue",
+      ),
+      false,
+      JSON.stringify(ineligibleState),
+    );
+  }
+
+  for (const securityLabel of [
+    "security",
+    "security-sensitive",
+    "security:sensitive",
+    "security/internal",
+    "impact:security",
+  ]) {
+    assert.equal(
+      issueAdvisoryLabelsForTest(["bug", securityLabel], eligibleState).includes(
+        "good first issue",
+      ),
+      false,
+      securityLabel,
+    );
+  }
+  assert.equal(
+    issueAdvisoryLabelsForTest(["bug", "maintainer"], eligibleState).includes("good first issue"),
+    false,
+  );
+  assert.equal(
+    issueAdvisoryLabelsForTest(["bug", "good first issue"], {
+      ...eligibleState,
+      implementationComplexity: "medium",
+    }).includes("good first issue"),
+    true,
+  );
+});
+
+test("ClawSweeper respects human good first issue removal", () => {
+  assert.equal(
+    goodFirstIssueLabelOptedOutForTest([
+      {
+        id: 1,
+        event: "labeled",
+        label: { name: "good first issue" },
+        actor: { login: "openclaw-clawsweeper[bot]" },
+        created_at: "2026-07-01T00:00:00Z",
+      },
+      {
+        id: 2,
+        event: "unlabeled",
+        label: { name: "good first issue" },
+        actor: { login: "maintainer" },
+        created_at: "2026-07-02T00:00:00Z",
+      },
+      {
+        id: 3,
+        event: "labeled",
+        label: { name: "good first issue" },
+        actor: { login: "openclaw-clawsweeper[bot]" },
+        created_at: "2026-07-03T00:00:00Z",
+      },
+    ]),
+    true,
+  );
+  assert.equal(
+    goodFirstIssueLabelOptedOutForTest([
+      {
+        id: 2,
+        event: "unlabeled",
+        label: "good first issue",
+        actor: "maintainer",
+        createdAt: "2026-07-02T00:00:00Z",
+      },
+      {
+        id: 3,
+        event: "labeled",
+        label: "good first issue",
+        actor: "maintainer",
+        createdAt: "2026-07-03T00:00:00Z",
+      },
+      {
+        id: 4,
+        event: "unlabeled",
+        label: "good first issue",
+        actor: "github-actions[bot]",
+        createdAt: "2026-07-04T00:00:00Z",
+      },
+    ]),
+    false,
+  );
+  assert.equal(
+    goodFirstIssueLabelOptedOutForTest([
+      {
+        id: 1,
+        event: "unlabeled",
+        label: "good first issue",
+        actor: "openclaw-clawsweeper[bot]",
+        createdAt: "2026-07-02T00:00:00Z",
+      },
+    ]),
+    false,
+  );
+});
+
 test("ClawSweeper issue advisory labels protect queueable issues from stale automation", () => {
   const queueableLabels = issueAdvisoryLabelsForTest(["bug", "stale"], {
     type: "issue",
@@ -947,6 +1208,7 @@ test("ClawSweeper issue advisory labels remove stale owned labels and preserve o
         "clawsweeper:linked-pr-open",
         "clawsweeper:no-new-fix-pr",
         "clawsweeper:queueable-fix",
+        "good first issue",
         "clawsweeper:fix-shape-clear",
         "clawsweeper:needs-product-decision",
         "clawsweeper:needs-security-review",
@@ -967,6 +1229,7 @@ test("ClawSweeper issue advisory labels remove stale owned labels and preserve o
     ),
     [
       "bug",
+      "good first issue",
       "clawsweeper:autofix",
       "clawsweeper:automerge",
       "clawsweeper:human-review",

@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
   canPatchReviewComment,
   itemSourceRevisionSha256ForTest,
   isCodexReviewCommentBody,
+  newReviewStartLeaseOwnerForTest,
   renderReviewCommentFromReport,
   renderReviewStartStatusComment,
   reviewAutomationMarkersFromReport,
+  reviewStartLeaseWinnerCommentIdForTest,
+  supersededReviewPlaceholderCommentIds,
+  shouldPreserveReviewStartLease,
+  withReviewStartStatusLease,
 } from "../dist/clawsweeper.js";
 import { detailsBody, reportFrontMatter } from "./helpers.ts";
 
@@ -54,6 +60,23 @@ function implementedCloseReport(overrides = {}) {
   ].join("\n");
 }
 
+test("GitHub workflow review leases use a recoverable run identity", () => {
+  assert.equal(
+    newReviewStartLeaseOwnerForTest(
+      { GITHUB_RUN_ID: "29083888985", GITHUB_RUN_ATTEMPT: "2" },
+      () => "random-owner",
+    ),
+    "github-run-29083888985-2",
+  );
+  assert.equal(
+    newReviewStartLeaseOwnerForTest(
+      { GITHUB_RUN_ID: "29083888985", GITHUB_RUN_ATTEMPT: "invalid" },
+      () => "random-owner",
+    ),
+    "random-owner",
+  );
+});
+
 test("comment matcher recognizes old and new Codex review comments", () => {
   assert.equal(
     isCodexReviewCommentBody(
@@ -82,6 +105,176 @@ test("comment matcher recognizes old and new Codex review comments", () => {
   assert.equal(isCodexReviewCommentBody("Thanks for the report, I can reproduce this."), false);
 });
 
+test("structural cache probes before hydration but acquires a lease before carrying a hit", () => {
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const reviewLoop = source.slice(
+    source.indexOf("for (const item of candidates)"),
+    source.indexOf("let decision: Decision", source.indexOf("for (const item of candidates)")),
+  );
+  const structuralEligibility = reviewLoop.indexOf("reviewStructuralCacheProbeDecision({");
+  const structuralProbe = reviewLoop.indexOf(
+    "structuralRecord = fetchReviewStructuralRecord({",
+    structuralEligibility,
+  );
+  const structuralCache = reviewLoop.indexOf("reviewStructuralCacheDecision({", structuralProbe);
+  const structuralHit = reviewLoop.indexOf("if (structuralDecision.hit)");
+  const structuralLease = reviewLoop.indexOf("postReviewStartStatusComment({", structuralHit);
+  const structuralRevalidation = reviewLoop.indexOf(
+    "structuralCacheRevalidations += 1",
+    structuralLease,
+  );
+  const structuralWrite = reviewLoop.indexOf("writeFileSync(reportPath, carried", structuralLease);
+  const contentCache = reviewLoop.indexOf("reviewContentCacheHit({");
+  const hydration = reviewLoop.indexOf("collectItemContext(item");
+  const mediaPrep = reviewLoop.indexOf("prepareMediaProofArtifacts(context", contentCache);
+
+  assert.ok(structuralEligibility >= 0);
+  assert.ok(structuralProbe > structuralEligibility);
+  assert.ok(structuralCache >= 0);
+  assert.ok(structuralCache < hydration);
+  assert.ok(structuralHit > structuralCache);
+  assert.ok(structuralLease > structuralHit);
+  assert.ok(structuralRevalidation > structuralLease);
+  assert.ok(structuralWrite > structuralRevalidation);
+  assert.ok(structuralWrite < hydration);
+  assert.ok(contentCache > structuralLease);
+  assert.ok(mediaPrep > contentCache);
+  assert.match(
+    reviewLoop.slice(structuralHit, structuralWrite),
+    /review_lease_owner[\s\S]*acquiredReviewLease\.owner/,
+  );
+  assert.match(
+    reviewLoop.slice(structuralHit, structuralWrite),
+    /review_lease_comment_id[\s\S]*acquiredReviewLease\.commentId/,
+  );
+  const hydratedAnchor = reviewLoop.indexOf(
+    "reviewStructuralRecordsDescribeSameVerdictInput(",
+    hydration,
+  );
+  assert.ok(hydratedAnchor > hydration);
+  assert.match(reviewLoop.slice(hydration, hydratedAnchor + 160), /preHydrationStructuralRecord/);
+  assert.match(
+    reviewLoop.slice(structuralRevalidation, structuralWrite),
+    /git = loadReviewGitInfo\(\)[\s\S]*fetchReviewStructuralRecord\(\{/,
+  );
+  assert.match(
+    reviewLoop.slice(structuralRevalidation, structuralWrite),
+    /liveClawSweeperReviewDigest\(item\.number\)[\s\S]*previousReviewIdentityMatches/,
+  );
+  const structuralProbeSource = source.slice(
+    source.indexOf("function fetchReviewStructuralRecord"),
+    source.indexOf("function collectItemContext"),
+  );
+  assert.match(structuralProbeSource, /pullChecksContext\(options\.item\.number, headSha\)/);
+  assert.match(structuralProbeSource, /pullChecksDigest = sha256\(stableJson\(pullChecks\)\)/);
+  assert.match(structuralProbeSource, /if \(!options\.git\.releaseStateComplete\) return null/);
+  const gitInfoBlock = source.slice(
+    source.indexOf("function gitInfo("),
+    source.indexOf("function reviewTargetBranch"),
+  );
+  assert.match(gitInfoBlock, /releaseStateComplete = false/);
+  assert.match(gitInfoBlock, /"release",\s+"list"/);
+  assert.match(gitInfoBlock, /"tagName,name,publishedAt,isLatest"/);
+  assert.match(gitInfoBlock, /release\.isLatest === true/);
+  assert.doesNotMatch(gitInfoBlock, /releases\[0\]/);
+  assert.match(gitInfoBlock, /return \{ mainSha, releaseStateComplete, latestRelease \}/);
+  assert.match(source, /coordination-held\.json/);
+  assert.match(source, /coordinationHeldRetryAt = startComment\.retryAt/);
+  assert.match(source, /review-cache-metrics\.json/);
+  const workflow = readFileSync(".github/workflows/sweep.yml", "utf8");
+  assert.match(
+    workflow,
+    /review-artifacts\/shard-\$\{\{ matrix\.shard \}\}\/review-cache-metrics\.json/,
+  );
+});
+
+test("semantic cache runs after hydration and revalidates under the acquired lease", () => {
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const reviewLoop = source.slice(
+    source.indexOf("for (const item of candidates)"),
+    source.indexOf("let decision: Decision", source.indexOf("for (const item of candidates)")),
+  );
+  const hydration = reviewLoop.indexOf("collectItemContext(item");
+  const semanticRecord = reviewLoop.indexOf("createReviewSemanticRecord({", hydration);
+  const issueLease = reviewLoop.indexOf('} else if (item.kind !== "pull_request")', hydration);
+  const issueReviewRevalidation = reviewLoop.indexOf(
+    "fetchIssueReviewComments(item.number)",
+    issueLease,
+  );
+  const localRangeGuard = reviewLoop.lastIndexOf("if (!localRangeData)", semanticRecord);
+  const semanticDecision = reviewLoop.indexOf("reviewSemanticCacheDecision({", semanticRecord);
+  const semanticRevalidation = reviewLoop.indexOf(
+    "semanticCacheRevalidations += 1",
+    semanticDecision,
+  );
+  const checkRevalidation = reviewLoop.indexOf("pullChecksContext(", semanticRevalidation);
+  const priorReviewRevalidation = reviewLoop.indexOf(
+    "fetchIssueReviewComments(item.number)",
+    semanticRevalidation,
+  );
+  const relationRevalidation = reviewLoop.indexOf(
+    "refreshRelatedItemsContext(item, context)",
+    semanticRevalidation,
+  );
+  const revalidatedRecord = reviewLoop.indexOf(
+    "createReviewSemanticRecord({",
+    relationRevalidation,
+  );
+  const semanticWrite = reviewLoop.indexOf(
+    "writeFileSync(reportPath, carried",
+    semanticRevalidation,
+  );
+  const contentCache = reviewLoop.indexOf("reviewContentCacheHit({", semanticWrite);
+
+  assert.ok(hydration >= 0);
+  assert.ok(localRangeGuard > hydration);
+  assert.ok(issueLease > hydration);
+  assert.ok(issueReviewRevalidation > issueLease);
+  assert.ok(issueReviewRevalidation < semanticRecord);
+  assert.ok(semanticRecord > hydration);
+  assert.ok(semanticDecision > semanticRecord);
+  assert.ok(semanticRevalidation > semanticDecision);
+  assert.ok(checkRevalidation > semanticRevalidation);
+  assert.ok(priorReviewRevalidation > checkRevalidation);
+  assert.ok(relationRevalidation > priorReviewRevalidation);
+  assert.ok(revalidatedRecord > relationRevalidation);
+  assert.ok(semanticWrite > revalidatedRecord);
+  assert.ok(contentCache > semanticWrite);
+  assert.match(
+    reviewLoop.slice(semanticRevalidation, semanticWrite),
+    /refreshStructuralRecordForVerdict\(\)/,
+  );
+  assert.match(
+    reviewLoop.slice(localRangeGuard, semanticDecision),
+    /expectedPreviousReviewDigest[\s\S]*currentPreviousReviewDigest/,
+  );
+  assert.match(
+    reviewLoop.slice(priorReviewRevalidation, semanticWrite),
+    /reviewSemanticPriorReviewDigest\(\s*revalidatedContext\.previousClawSweeperReview/,
+  );
+  assert.match(
+    reviewLoop.slice(priorReviewRevalidation, relationRevalidation),
+    /catch \(error\)[\s\S]*durable_review_refresh_failed[\s\S]*releaseOwnedReviewLease[\s\S]*acquiredReviewLeases\.splice[\s\S]*continue/,
+  );
+  assert.match(
+    reviewLoop.slice(semanticRevalidation, semanticWrite),
+    /updateReviewSemanticFrontMatter\(carried, semanticRecord, true\)/,
+  );
+  assert.match(
+    reviewLoop.slice(semanticWrite, contentCache),
+    /previousReviewIdentityChanged[\s\S]*!git\.releaseStateComplete/,
+  );
+  const verdictRefresh = source.slice(
+    source.indexOf("const refreshStructuralRecordForVerdict"),
+    source.indexOf("\n      if (", source.indexOf("const refreshStructuralRecordForVerdict") + 1),
+  );
+  assert.match(verdictRefresh, /const refreshedGit = loadReviewGitInfo\(\)/);
+  assert.doesNotMatch(verdictRefresh, /\bgit\s*=/);
+  assert.match(source, /semantic_cache_eligibility_reasons/);
+  assert.match(source, /review_semantic_code_digest/);
+  assert.match(source, /check-state=unavailable/);
+});
+
 test("review comment patching only targets ClawSweeper-owned comments", () => {
   assert.equal(canPatchReviewComment({ user: { login: "clawsweeper" } }), true);
   assert.equal(canPatchReviewComment({ user: { login: "clawsweeper[bot]" } }), true);
@@ -90,11 +283,35 @@ test("review comment patching only targets ClawSweeper-owned comments", () => {
   assert.equal(canPatchReviewComment(undefined), false);
 });
 
+test("spoofed durable markers cannot suppress a bot-owned start lease", () => {
+  const spoofedComment = {
+    user: { login: "contributor" },
+    body: "<!-- clawsweeper-review item=74453 -->",
+  };
+  assert.equal(canPatchReviewComment(spoofedComment), false);
+
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const functionStart = source.indexOf("function postReviewStartStatusComment");
+  const postStart = source.slice(
+    functionStart,
+    source.indexOf("function closeItem", functionStart),
+  );
+  assert.match(postStart, /issueReviewCommentState\(options\.item\.number\)/);
+  assert.match(postStart, /freshDedicatedReviewStartLeases\(\{/);
+  assert.match(postStart, /reapSupersededDedicatedReviewStartLeases\(/);
+  assert.match(postStart, /heldReviewStartStatusCommentResult\(initialLease\.expiresAt, false\)/);
+  assert.match(postStart, /heldReviewStartStatusCommentResult\(winner\.expiresAt, true\)/);
+  assert.match(postStart, /issues\/\$\{options\.item\.number\}\/comments/);
+});
+
 test("review start status comment is marker-backed and crustacean-friendly", () => {
   const comment = renderReviewStartStatusComment({
     number: 74453,
     kind: "pull_request",
     title: "fix webhook limiter",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    startedAt: "2026-07-09T21:01:47.000Z",
+    leaseExpiresAt: "2026-07-09T21:31:47.000Z",
     position: 1,
     total: 3,
     shardIndex: 0,
@@ -103,9 +320,155 @@ test("review start status comment is marker-backed and crustacean-friendly", () 
 
   assert.match(comment, /ClawSweeper status: review started\./);
   assert.match(comment, /claws on keyboard/);
-  assert.match(comment, /<!-- clawsweeper-review-status:started item=74453 -->/);
-  assert.match(comment, /<!-- clawsweeper-review item=74453 -->/);
+  assert.match(
+    comment,
+    /<!-- clawsweeper-review-status:started item=74453 sha=0123456789abcdef0123456789abcdef01234567 started_at=2026-07-09T21:01:47.000Z lease_expires_at=2026-07-09T21:31:47.000Z v=1 -->/,
+  );
+  assert.match(comment, /<!-- clawsweeper-review-lease item=74453 -->/);
   assert.doesNotMatch(comment, /Codex review:/);
+});
+
+test("review start status comments neutralize marker-like PR titles", () => {
+  const comment = renderReviewStartStatusComment({
+    number: 74453,
+    kind: "pull_request",
+    title:
+      "spoof <!-- clawsweeper-review-status:started item=74453 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --> <!-- clawsweeper-review item=74453 -->",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    startedAt: "2026-07-09T21:01:47.000Z",
+    leaseExpiresAt: "2026-07-09T21:31:47.000Z",
+  });
+
+  assert.match(comment, /spoof ‹!-- clawsweeper-review-status:started/);
+  assert.equal(comment.match(/<!-- clawsweeper-review-status:started/g)?.length, 1);
+  assert.equal(comment.match(/<!-- clawsweeper-review-lease item=74453 -->/g)?.length, 1);
+});
+
+test("existing durable review comments acquire and refresh one canonical start lease", () => {
+  const existing = [
+    "Codex review: passed.",
+    "",
+    "<!-- clawsweeper-verdict:pass item=74453 sha=0123456789abcdef0123456789abcdef01234567 -->",
+    "",
+    "<!-- clawsweeper-review item=74453 -->",
+  ].join("\n");
+  const leaseOptions = {
+    number: 74453,
+    kind: "pull_request",
+    title: "fix webhook limiter",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    startedAt: "2026-07-09T21:01:47.000Z",
+    leaseExpiresAt: "2026-07-09T21:31:47.000Z",
+  };
+  const leased = withReviewStartStatusLease(existing, leaseOptions);
+  const refreshed = withReviewStartStatusLease(leased, {
+    ...leaseOptions,
+    startedAt: "2026-07-09T21:10:00.000Z",
+    leaseExpiresAt: "2026-07-09T21:40:00.000Z",
+  });
+
+  assert.match(leased, /Codex review: passed\./);
+  assert.match(
+    leased,
+    /lease_expires_at=2026-07-09T21:31:47.000Z v=1 -->\n\n<!-- clawsweeper-review item=74453 -->$/,
+  );
+  assert.equal(refreshed.match(/<!-- clawsweeper-review-status:started/g)?.length, 1);
+  assert.doesNotMatch(refreshed, /21:31:47\.000Z/);
+  assert.match(refreshed, /lease_expires_at=2026-07-09T21:40:00.000Z/);
+});
+
+test("legacy durable review comments without an identity acquire a canonical start lease", () => {
+  const leased = withReviewStartStatusLease("Codex review: passed.", {
+    number: 74453,
+    kind: "pull_request",
+    title: "fix webhook limiter",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    startedAt: "2026-07-09T21:01:47.000Z",
+    leaseExpiresAt: "2026-07-09T21:31:47.000Z",
+  });
+
+  assert.match(leased, /^Codex review: passed\./);
+  assert.match(
+    leased,
+    /<!-- clawsweeper-review-status:started [^>]+ -->\n\n<!-- clawsweeper-review item=74453 -->$/,
+  );
+});
+
+test("only the exact lease owner and comment can clear an active lease", () => {
+  const currentHeadSha = "0123456789abcdef0123456789abcdef01234567";
+  const base = {
+    currentHeadSha,
+    reportHeadSha: currentHeadSha,
+    reportLeaseOwner: "worker-a",
+    reportLeaseCommentId: "100",
+    leaseOwner: "worker-a",
+    leaseCommentId: 100,
+  };
+
+  assert.equal(shouldPreserveReviewStartLease(base), false);
+  assert.equal(shouldPreserveReviewStartLease({ ...base, reportLeaseOwner: undefined }), true);
+  assert.equal(
+    shouldPreserveReviewStartLease({
+      ...base,
+      reportHeadSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldPreserveReviewStartLease({
+      ...base,
+      reportLeaseOwner: "worker-b",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldPreserveReviewStartLease({
+      ...base,
+      reportLeaseCommentId: "101",
+    }),
+    true,
+  );
+  assert.equal(shouldPreserveReviewStartLease({ ...base, leaseOwner: null }), true);
+});
+
+test("concurrent review lease election uses server comment order, not client timestamps", () => {
+  const itemNumber = 74453;
+  const headSha = "0123456789abcdef0123456789abcdef01234567";
+  const leaseComment = (id: number, owner: string, startedAt: string) => ({
+    id,
+    user: { login: "clawsweeper[bot]" },
+    body: [
+      `<!-- clawsweeper-review-status:started item=${itemNumber} sha=${headSha} started_at=${startedAt} lease_expires_at=2026-07-09T22:31:47.000Z owner=${owner} v=1 -->`,
+      "",
+      `<!-- clawsweeper-review-lease item=${itemNumber} -->`,
+    ].join("\n"),
+  });
+
+  assert.equal(
+    reviewStartLeaseWinnerCommentIdForTest({
+      comments: [
+        leaseComment(200, "delayed-worker", "2026-07-09T21:00:00.000Z"),
+        leaseComment(100, "confirmed-worker", "2026-07-09T21:01:00.000Z"),
+      ],
+      itemNumber,
+      headSha,
+      nowMs: Date.parse("2026-07-09T21:02:00.000Z"),
+    }),
+    100,
+  );
+});
+
+test("apply retains its mutation lease until the item action is complete", () => {
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const acquire = source.indexOf("const mutationLeaseBlockReason = acquireApplyMutationLease");
+  const commentSync = source.indexOf("syncedComment = upsertReviewComment(", acquire);
+  const close = source.indexOf("closeItem({ number, kind: item.kind", commentSync);
+  const release = source.indexOf("releaseActiveApplyMutationLease();", close);
+  assert.ok(acquire >= 0);
+  assert.ok(commentSync > acquire);
+  assert.ok(close > commentSync);
+  assert.ok(release > close);
+  assert.doesNotMatch(source, /deleteSupersededDedicatedReviewStartLeases/);
 });
 
 test("review item source revision ignores advisory labels but tracks protected labels", () => {
@@ -129,7 +492,9 @@ test("review item source revision ignores advisory labels but tracks protected l
           { name: "impact:message-loss" },
           { name: "issue-rating: 🦪 silver shellfish" },
           { name: "P1" },
+          { name: "maturity:stable" },
           { name: "feature: ✨ showcase" },
+          { name: "good first issue" },
           { name: "mantis: telegram-visible-proof" },
           { name: "triage: needs-real-behavior-proof" },
           { name: "clawsweeper:reviewed" },
@@ -155,6 +520,13 @@ test("review item source revision ignores advisory labels but tracks protected l
     ),
     revision,
   );
+  assert.notEqual(
+    itemSourceRevisionSha256ForTest(
+      { ...item, labels: [...item.labels, { name: "proof: override" }] },
+      [],
+    ),
+    revision,
+  );
 });
 
 test("pull request keep-open review comments label the change summary", () => {
@@ -176,6 +548,26 @@ Keep this test-only PR open for maintainer review.
 ## What This Changes
 
 Adds regression coverage for session-scoped model overrides.
+
+## System Context
+
+OpenClaw resolves a session's model override before sending the next agent request.
+
+## Architecture Diagram
+
+flowchart LR
+    session["Session settings"] --> resolver["Model resolver"]
+    resolver --> request["Agent request"]
+
+## Real Behavior Proof
+
+Status: sufficient
+
+Evidence kind: terminal
+
+Needs contributor action: false
+
+Summary: A live session confirmed the override reaches the next request.
 
 ## Best Possible Solution
 
@@ -227,10 +619,25 @@ Reason: Maintainers should review the tests after the targeted lane is green.
   assert.doesNotMatch(comment, /\*\*Latest ClawSweeper review:\*\*/);
   assert.match(
     comment,
-    /\*\*Summary\*\*\nAdds regression coverage for session-scoped model overrides\./,
+    /## What this changes\n\nAdds regression coverage for session-scoped model overrides\./,
   );
+  assert.ok(comment.indexOf("## What this changes") < comment.indexOf("## Merge readiness"));
+  assert.match(comment, /## Merge readiness\n\n✅ \*\*Ready for maintainer review\*\*/);
+  assert.doesNotMatch(comment, /\| \| \|\n\|---\|---\|/);
+  assert.match(comment, /## Review scores\n\n\| Measure \| Result \| What it means \|/);
+  assert.match(comment, /\| \*\*Overall readiness\*\* \| .* \*\*\(5\/6\)\*\* \|/);
+  assert.match(comment, /## Verification\n\n\| Check \| Result \| Evidence \|/);
+  assert.match(comment, /\| \*\*Real behavior\*\* \| Verified \| Sufficient \(terminal\):/);
+  assert.match(comment, /\| \*\*Evidence reviewed\*\* \| 1 item \| targeted lane:/);
+  assert.match(
+    comment,
+    /## How this fits together\n\nOpenClaw resolves a session's model override before sending the next agent request\.\n\n```mermaid\nflowchart LR/,
+  );
+  assert.ok(comment.indexOf("## Verification") < comment.indexOf("## How this fits together"));
+  assert.doesNotMatch(comment, /## Proof/);
+  assert.match(comment, /\*\*Reviewed head:\*\* `abc123def456`/);
   assert.doesNotMatch(comment, /\*\*Workflow note:\*\*/);
-  assert.match(comment, /<summary>How this review workflow works<\/summary>/);
+  assert.match(comment, /### Workflow/);
   assert.match(
     comment,
     /- Re-runs edit this comment so the latest verdict, findings, and automation markers stay together instead of adding duplicate bot comments\./,
@@ -259,9 +666,9 @@ Reason: Maintainers should review the tests after the targeted lane is green.
     comment,
     /- Maintainers can comment `@clawsweeper explain` to ask for more context, or `@clawsweeper stop` to stop active automation\./,
   );
-  assert.match(comment, /\*\*Next step before merge\*\*/);
-  assert.match(comment, /Maintainers should review the tests after the targeted lane is green\./);
-  assert.match(comment, /<details>\n<summary>Review details<\/summary>/);
+  // Ordinary maintainer review guidance collapses out of the checklist.
+  assert.match(comment, /## Before merge\n\nNone\./);
+  assert.match(comment, /<summary><strong>Agent review details<\/strong><\/summary>/);
   assert.match(
     comment,
     /Best possible solution:\n\nLand the tests after targeted validation is green\./,
@@ -275,31 +682,50 @@ Reason: Maintainers should review the tests after the targeted lane is green.
     /Is this the best way to solve the issue\?\n\nYes\. Landing the focused regression test/,
   );
   assert.match(
-    detailsBody(comment, "Review details"),
-    /AGENTS\.md: found and applied where relevant\./,
-  );
-  assert.doesNotMatch(
-    detailsBody(comment, "Evidence reviewed"),
+    detailsBody(comment, "Agent review details"),
     /AGENTS\.md: found and applied where relevant\./,
   );
   assert.ok(
-    comment.indexOf("Is this the best way to solve the issue?") <
-      comment.indexOf("<summary>Evidence reviewed</summary>"),
+    comment.indexOf("Is this the best way to solve the issue?") < comment.indexOf("### Evidence"),
   );
-  assert.match(detailsBody(comment, "Evidence reviewed"), /What I checked:/);
-  assert.ok(
-    comment.indexOf("<summary>Review details</summary>") <
-      comment.indexOf("<summary>Evidence reviewed</summary>"),
-  );
-  assert.ok(
-    comment.indexOf("<summary>Evidence reviewed</summary>") <
-      comment.indexOf("<summary>What the crustacean ranks mean</summary>"),
-  );
-  assert.ok(
-    comment.indexOf("<summary>What the crustacean ranks mean</summary>") <
-      comment.indexOf("<summary>How this review workflow works</summary>"),
-  );
+  assert.match(detailsBody(comment, "Agent review details"), /What I checked:/);
+  assert.ok(comment.indexOf("### Technical review") < comment.indexOf("### Evidence"));
+  assert.ok(comment.indexOf("### Evidence") < comment.indexOf("### Rating scale"));
+  assert.ok(comment.indexOf("### Rating scale") < comment.indexOf("### Workflow"));
   assert.match(comment, /<!-- clawsweeper-verdict:needs-human item=74265 sha=abc123def456/);
+});
+
+test("review comments include the UTC date when ET and UTC calendar dates differ", () => {
+  const comment = renderReviewCommentFromReport(
+    `${reportFrontMatter({
+      type: "pull_request",
+      number: "74266",
+      decision: "keep_open",
+      close_reason: "none",
+      work_candidate: "none",
+      pull_head_sha: "abc123def456",
+      reviewed_at: "2026-07-09T03:00:00.000Z",
+    })}
+
+## Summary
+
+Keep this PR open for maintainer review.
+
+## What This Changes
+
+Updates review timestamp formatting.
+
+## Best Possible Solution
+
+Land the timestamp fix after targeted validation is green.
+`,
+    "none",
+  );
+
+  assert.match(
+    comment,
+    /Codex review: needs maintainer review before merge\. _Reviewed July 8, 2026, 11:00 PM ET \/ July 9, 2026, 03:00 UTC\._/,
+  );
 });
 
 test("issue keep-open review comments surface reproducibility in the summary", () => {
@@ -451,11 +877,11 @@ test("pull request close comments emit close-required automation markers", () =>
 
   assert.match(
     comment,
-    /<!-- clawsweeper-verdict:close item=74270 sha=abc123def456 confidence=high updated_at=2026-05-01T00:00:00Z reviewed_at=[^ ]+ source_revision=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef action_taken=proposed_close reason=implemented_on_main -->/,
+    /<!-- clawsweeper-verdict:close item=74270 sha=abc123def456 confidence=high updated_at=2026-05-01T00:00:00Z reviewed_at=[^ ]+ lease_owner=unknown lease_comment_id=unknown source_revision=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef action_taken=proposed_close reason=implemented_on_main -->/,
   );
   assert.match(
     comment,
-    /<!-- clawsweeper-action:close-required item=74270 sha=abc123def456 confidence=high updated_at=2026-05-01T00:00:00Z reviewed_at=[^ ]+ source_revision=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef action_taken=proposed_close reason=implemented_on_main -->/,
+    /<!-- clawsweeper-action:close-required item=74270 sha=abc123def456 confidence=high updated_at=2026-05-01T00:00:00Z reviewed_at=[^ ]+ lease_owner=unknown lease_comment_id=unknown source_revision=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef action_taken=proposed_close reason=implemented_on_main -->/,
   );
   assert.doesNotMatch(comment, /clawsweeper-verdict:needs-human/);
 });
@@ -570,10 +996,11 @@ Reason: Normal maintainer review is sufficient.
     "none",
   );
 
-  assert.match(comment, /\*\*Security\*\*/);
+  assert.match(comment, /\| \*\*Security\*\* \| Needs attention \|/);
+  assert.match(comment, /### Security/);
   assert.match(comment, /Needs attention:/);
   assert.match(comment, /Confirm issue write scope/);
-  assert.match(comment, /Review details/);
+  assert.match(comment, /Agent review details/);
   assert.doesNotMatch(comment, /recent workflow maintainer/);
   assert.match(comment, /recent workflow contributor/);
   assert.match(comment, /<!-- clawsweeper-security:security-sensitive item=74265 sha=abc123def456/);
@@ -632,10 +1059,10 @@ Reason: The fix is narrow and can be made on the PR branch.
 
   assert.match(comment, /Codex review: needs changes before merge\./);
   assert.doesNotMatch(comment, /\*\*Workflow note:\*\*/);
-  assert.match(comment, /<summary>How this review workflow works<\/summary>/);
+  assert.match(comment, /### Workflow/);
   assert.match(
     comment,
-    /\*\*Review findings\*\*\n- \[P1\] Validate replace paths — `src\/config\/apply\.ts:42-44`/,
+    /## Findings\n\n- \[P1\] Validate replace paths — `src\/config\/apply\.ts:42-44`/,
   );
   assert.doesNotMatch(comment, /\*\*\[P[0-2]\]\*\*/);
   assert.match(comment, /Full review comments:/);
@@ -670,10 +1097,8 @@ Land this docs-only PR after maintainer review.
     "none",
   );
 
-  assert.match(
-    comment,
-    /\*\*Next step before merge\*\*\n- Land this docs-only PR after maintainer review\./,
-  );
+  // Ordinary maintainer review is routine, so it collapses out of Before merge.
+  assert.match(comment, /## Before merge\n\nNone\./);
   assert.doesNotMatch(comment, /\[P2\] Land this docs-only PR/);
   assert.doesNotMatch(comment, /Best possible solution:/);
 });
@@ -709,11 +1134,8 @@ No ClawSweeper repair lane is needed; the submitted PR is narrow and the remaini
     "none",
   );
 
-  assert.match(comment, /Rank-up moves:\n- none/);
-  assert.match(
-    comment,
-    /\*\*Next step before merge\*\*\n- No ClawSweeper repair lane is needed; the submitted PR is narrow and the remaining action is normal maintainer review and CI\./,
-  );
+  assert.match(comment, /## Before merge\n\nNone\./);
+  assert.doesNotMatch(comment, /No ClawSweeper repair lane is needed/);
   assert.doesNotMatch(comment, /\[P2\] none/);
   assert.doesNotMatch(comment, /\[P2\] No ClawSweeper repair lane is needed/);
 });
@@ -746,7 +1168,7 @@ Prove the fail-closed compatibility break is handled before merge.
 
   assert.match(
     comment,
-    /\*\*Next step before merge\*\*\n- \[P1\] Prove the fail-closed compatibility break is handled before merge\./,
+    /- \[ \] \*\*Complete next step \(P1\)\*\* - Prove the fail-closed compatibility break is handled before merge\./,
   );
   assert.doesNotMatch(comment, /\*\*\[P1\]\*\*/);
 });
@@ -790,10 +1212,7 @@ Full review comments:
   );
 
   assert.match(comment, /Codex review: passed\./);
-  assert.match(
-    comment,
-    /\*\*Next step before merge\*\*\n- Merge after required checks are green\./,
-  );
+  assert.match(comment, /## Before merge\n\nNone\./);
   assert.doesNotMatch(comment, /\[P2\] Merge after required checks are green/);
   assert.doesNotMatch(comment, /Automerge follow-up:/);
   assert.match(comment, /<!-- clawsweeper-verdict:pass item=74453 sha=abc123def456/);
@@ -830,4 +1249,110 @@ Full review comments:
 
   assert.match(markers, /clawsweeper-verdict:needs-human/);
   assert.doesNotMatch(markers, /clawsweeper-verdict:pass/);
+});
+
+test("superseded review placeholder sweep deletes only stale bot placeholder comments", () => {
+  const nowMs = Date.parse("2026-07-18T22:13:00.000Z");
+  const bot = { login: "openclaw-clawsweeper[bot]" };
+  const expiredPlaceholder = renderReviewStartStatusComment({
+    number: 110918,
+    kind: "pull_request",
+    title: "fix webhook limiter",
+    headSha: "0123456789abcdef0123456789abcdef01234567",
+    startedAt: "2026-07-18T21:41:00.000Z",
+    leaseExpiresAt: "2026-07-18T22:11:00.000Z",
+  });
+  const freshPlaceholder = renderReviewStartStatusComment({
+    number: 110918,
+    kind: "pull_request",
+    title: "fix webhook limiter",
+    headSha: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    startedAt: "2026-07-18T22:06:00.000Z",
+    leaseExpiresAt: "2026-07-18T22:36:00.000Z",
+  });
+  const comments = [
+    {
+      id: 1,
+      user: bot,
+      body: "Codex review: keep open.\n\n<!-- clawsweeper-review item=110918 -->",
+    },
+    { id: 2, user: bot, body: expiredPlaceholder },
+    { id: 3, user: bot, body: freshPlaceholder },
+    {
+      id: 4,
+      user: bot,
+      body: "ClawSweeper status: review started.\n\nLegacy placeholder without a lease marker.",
+    },
+    { id: 5, user: { login: "steipete" }, body: expiredPlaceholder },
+    { id: 6, user: bot, body: expiredPlaceholder },
+  ];
+
+  assert.deepEqual(
+    supersededReviewPlaceholderCommentIds({
+      number: 110918,
+      comments,
+      keepCommentIds: new Set([6]),
+      nowMs,
+    }),
+    [2, 4],
+  );
+});
+
+test("superseded review placeholder sweep never selects the durable review comment", () => {
+  const nowMs = Date.parse("2026-07-18T22:13:00.000Z");
+  const comments = [
+    {
+      id: 7,
+      user: { login: "clawsweeper[bot]" },
+      body: [
+        "ClawSweeper status: review started.",
+        "",
+        "Codex review: keep open.",
+        "",
+        "<!-- clawsweeper-review item=110918 -->",
+      ].join("\n"),
+    },
+  ];
+
+  assert.deepEqual(
+    supersededReviewPlaceholderCommentIds({
+      number: 110918,
+      comments,
+      keepCommentIds: new Set(),
+      nowMs,
+    }),
+    [],
+  );
+});
+
+test("publishing the durable review comment sweeps superseded placeholders", () => {
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const functionStart = source.indexOf("function postReviewStartStatusComment");
+  const postStart = source.slice(
+    functionStart,
+    source.indexOf("function deleteOwnedDedicatedReviewStartLease", functionStart),
+  );
+  // Lease acquisition must keep POSTing a fresh comment per contender: the
+  // lowest-server-id election needs distinct ids, so no in-place PATCH reuse.
+  assert.match(postStart, /issues\/\$\{options\.item\.number\}\/comments/);
+  assert.doesNotMatch(postStart, /"PATCH"/);
+
+  const applyStart = source.indexOf('syncReasons.push("updated durable Codex review comment")');
+  assert.ok(applyStart >= 0);
+  const applyWindow = source.slice(applyStart, applyStart + 1200);
+  assert.match(applyWindow, /cleanupSupersededReviewPlaceholderComments\(\{/);
+});
+
+test("placeholder sweep retries on every apply pass independent of comment body sync", () => {
+  const source = readFileSync("src/clawsweeper.ts", "utf8");
+  const earlyLeaseStart = source.indexOf("const earlyLeaseState = refreshReviewStartLeaseState();");
+  assert.ok(earlyLeaseStart >= 0);
+  const needsReviewCommentSyncStart = source.indexOf(
+    "let needsReviewCommentSync = shouldSyncReviewComment({",
+    earlyLeaseStart,
+  );
+  assert.ok(needsReviewCommentSyncStart > earlyLeaseStart);
+  const earlyWindow = source.slice(earlyLeaseStart, needsReviewCommentSyncStart);
+  assert.match(earlyWindow, /cleanupSupersededReviewPlaceholderComments\(\{/);
+  assert.match(earlyWindow, /comments:\s*earlyLeaseState\.comments/);
 });
