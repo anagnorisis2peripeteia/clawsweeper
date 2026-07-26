@@ -59,11 +59,14 @@ const COMMIT_REVIEW_CHECK_NAME = "ClawSweeper Commit Review";
 export const LOCAL_REVIEW_SUPPORTED_ENGINES = [
   "codex",
   "claude",
+  "grok",
   "agy-claude",
   "agy-gemini",
   "cursor",
   "opencode",
 ] as const;
+export const DEFAULT_GROK_MODEL = "grok-4.5";
+export const DEFAULT_GROK_REASONING_EFFORT = "high";
 export const DEFAULT_AGY_CLAUDE_MODEL = "Claude Opus 4.6 (Thinking)";
 export const DEFAULT_AGY_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
 export const DEFAULT_CURSOR_MODEL = "auto";
@@ -534,6 +537,108 @@ function runClaudeReview(options: {
   return markdown;
 }
 
+// Local-review Grok engine: Grok 4.5 @ high is the frontier floor (Cameron 2026-07-27).
+// Prompt is written to a file (ARG_MAX); plan mode + always-approve keeps it non-editing.
+function runGrokReview(options: {
+  model: string;
+  reasoningEffort: string;
+  targetDir: string;
+  targetRepo: string;
+  sha: string;
+  baseSha: string;
+  metadata: CommitMetadata;
+  timeoutMs: number;
+  workDir: string;
+  additionalPrompt: string;
+}): string {
+  const prompt = promptForReadOnlyRangeReview({
+    targetDir: options.targetDir,
+    targetRepo: options.targetRepo,
+    sha: options.sha,
+    baseSha: options.baseSha,
+    metadata: options.metadata,
+    additionalPrompt: options.additionalPrompt,
+    maxDiffBytes: REVIEW_MAX_DIFF_BYTES,
+  });
+  if ("detail" in prompt) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: prompt.detail,
+      timeout: false,
+    });
+  }
+  const promptPath = join(options.workDir, "grok-prompt.txt");
+  writeFileSync(promptPath, prompt.prompt, "utf8");
+  const home = process.env.HOME?.trim() || homedir();
+  const grokBin =
+    process.env.GROK_BIN?.trim() ||
+    (existsSync(join(home, ".grok", "bin", "grok"))
+      ? join(home, ".grok", "bin", "grok")
+      : existsSync(join(home, ".local", "bin", "grok"))
+        ? join(home, ".local", "bin", "grok")
+        : "grok");
+  const stdoutPath = join(options.workDir, "grok-stdout.log");
+  const result = runCodexProcess({
+    command: grokBin,
+    args: [
+      "--prompt-file",
+      promptPath,
+      "-m",
+      options.model || DEFAULT_GROK_MODEL,
+      "--reasoning-effort",
+      options.reasoningEffort || DEFAULT_GROK_REASONING_EFFORT,
+      "--permission-mode",
+      "plan",
+      "--always-approve",
+      "--cwd",
+      options.targetDir,
+      "--output-format",
+      "plain",
+      "--disable-web-search",
+      "--tools",
+      "read_file,list_dir,grep",
+    ],
+    cwd: options.targetDir,
+    env: reviewEngineEnv(),
+    input: "",
+    timeoutMs: options.timeoutMs,
+    stdoutPath,
+  });
+  const stdout = existsSync(stdoutPath) ? readFileSync(stdoutPath, "utf8") : result.stdout;
+  if (result.error || result.status !== 0) {
+    const timeout = codexProcessErrorCode(result.error) === "ETIMEDOUT";
+    const detail =
+      result.error instanceof Error
+        ? `${result.error.message}\n${safeOutputTail(result.stderr) || safeOutputTail(stdout)}`
+        : `exit ${result.status ?? "unknown"}\n${
+            safeOutputTail(result.stderr) || safeOutputTail(stdout) || "No output."
+          }`;
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: detail.trim(),
+      timeout,
+    });
+  }
+  const markdown = stripMarkdownFence(stdout);
+  if (!markdown.trim()) {
+    return failureReport({
+      targetRepo: options.targetRepo,
+      sha: options.sha,
+      baseSha: options.baseSha,
+      metadata: options.metadata,
+      detail: "grok produced no output",
+      timeout: false,
+    });
+  }
+  return markdown;
+}
+
 function agyPrintTimeout(timeoutMs: number): string {
   return `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`;
 }
@@ -996,6 +1101,19 @@ function localReviewCommand(args: Args): void {
       baseSha,
       metadata,
       timeoutMs: argNumber(args, "claude_timeout_ms", 1_800_000),
+      workDir: runDir,
+      additionalPrompt: fullAdditionalPrompt,
+    });
+  } else if (engine === "grok") {
+    reviewMarkdown = runGrokReview({
+      model: argString(args, "grok_model", DEFAULT_GROK_MODEL),
+      reasoningEffort: argString(args, "grok_reasoning_effort", DEFAULT_GROK_REASONING_EFFORT),
+      targetDir,
+      targetRepo,
+      sha: headSha,
+      baseSha,
+      metadata,
+      timeoutMs: argNumber(args, "grok_timeout_ms", 1_800_000),
       workDir: runDir,
       additionalPrompt: fullAdditionalPrompt,
     });

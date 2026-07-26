@@ -16358,6 +16358,7 @@ function planCommand(args: Args): void {
 const REVIEW_ENGINES = [
   "codex",
   "claude",
+  "grok",
   "agy-claude",
   "agy-gemini",
   "cursor",
@@ -16368,6 +16369,8 @@ type ReviewEngine = (typeof REVIEW_ENGINES)[number];
 const AGY_REVIEW_CLAUDE_MODEL = "Claude Opus 4.6 (Thinking)";
 const AGY_REVIEW_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
 const CURSOR_REVIEW_MODEL = "auto";
+const GROK_REVIEW_MODEL = "grok-4.5";
+const GROK_REVIEW_EFFORT = "high";
 
 function isReviewEngine(value: string): value is ReviewEngine {
   return (REVIEW_ENGINES as readonly string[]).includes(value);
@@ -16387,6 +16390,8 @@ function engineModelFor(engine: ReviewEngine, override: string): string {
       return CURSOR_REVIEW_MODEL;
     case "opencode":
       return OPENCODE_FLOOR_MODEL;
+    case "grok":
+      return GROK_REVIEW_MODEL;
     default:
       return "";
   }
@@ -16441,7 +16446,10 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // (qwen via `opencode`, plus cursor, agy-gemini) is for the dev-loop / pre-filter and
   // is invoked explicitly, NOT folded into the authoritative gate. Explicit engines run
   // single (exactly the one asked for; use `auto` for the strong-tier fallback).
-  if (requested === "auto") return ["agy-claude", "codex", "claude"];
+  // Strong tier: Grok 4.5 @ high is the preferred frontier floor (Cameron 2026-07-27),
+  // then codex main, then Claude. agy-claude remains in the cascade for cloud/explicit use
+  // but is not the default auto pick (headless local review issue #100).
+  if (requested === "auto") return ["grok", "codex", "claude"];
   // agy cannot complete a headless read-only review that needs to run commands
   // (issue #100): --add-dir grants file reads, but the sandboxed reviewer still
   // soft-denies Bash in --print mode, and --dangerously-skip-permissions — agy's
@@ -16451,6 +16459,7 @@ function reviewEngineCascadeOrder(requested: CascadeEngine): ReviewEngine[] {
   // hard-failing the gate; a working agy verdict is still returned when it produces one.
   if (requested === "agy-claude") return ["agy-claude", "codex", "claude"];
   if (requested === "agy-gemini") return ["agy-gemini", "codex", "claude"];
+  if (requested === "grok") return ["grok", "codex", "claude"];
   // `cheap` is the dev-loop / first-pass tier — the FULL review on a cheap model, so it
   // still flags PR-body/proof/mantis flaws, not just code (the code-only pass is the
   // separate autoreview/commit-sweeper gate). qwen-H100 (opencode) runs FIRST — free,
@@ -16960,6 +16969,43 @@ function engineSpawnSpec(
         args: ["-p", "--output-format", "text", "--mode", "ask", "--trust", "--model", model],
         input: prompt,
       };
+    case "grok": {
+      // Large structured prompts exceed argv limits — write to workDir and use --prompt-file.
+      // plan + always-approve keeps the pass non-editing; tools allow read/search of the
+      // checkout. Effort high is the frontier-floor default (Cameron 2026-07-27).
+      const promptPath = join(workDir, "grok-prompt.txt");
+      writeFileSync(promptPath, prompt, "utf8");
+      const home = process.env.HOME?.trim() || homedir();
+      const grokBin =
+        process.env.GROK_BIN?.trim() ||
+        (existsSync(join(home, ".grok", "bin", "grok"))
+          ? join(home, ".grok", "bin", "grok")
+          : existsSync(join(home, ".local", "bin", "grok"))
+            ? join(home, ".local", "bin", "grok")
+            : "grok");
+      return {
+        command: grokBin,
+        args: [
+          "--prompt-file",
+          promptPath,
+          "-m",
+          model || GROK_REVIEW_MODEL,
+          "--reasoning-effort",
+          GROK_REVIEW_EFFORT,
+          "--permission-mode",
+          "plan",
+          "--always-approve",
+          "--cwd",
+          openclawDir,
+          "--output-format",
+          "plain",
+          "--disable-web-search",
+          "--tools",
+          "read_file,list_dir,grep",
+        ],
+        input: "",
+      };
+    }
     case "agy-claude":
     case "agy-gemini":
       // agy 1.0.10: the prompt is the VALUE of --print (no stdin path).
