@@ -1520,6 +1520,97 @@ test("Markdown persistence contracts and structured frontmatter remain detectabl
 });
 
 for (const { name, file, surfaces, pullFilesTruncated, sqliteSchemaChange } of [
+  ...[
+    ["extensions/qa-lab/src/lab-server-capture.ts", "QA capture"],
+    ["extensions/qa-lab/src/live-transports/slack/adapter.runtime.ts", "Slack QA"],
+  ].map(([filename, operation]) => ({
+    name: `upgrade guidance without persistence evidence in ${filename}`,
+    file: {
+      filename,
+      patch: `@@\n+throw new Error("${operation} requires async proxy capture support. Upgrade the OpenClaw host.");`,
+    },
+    surfaces: [],
+  })),
+  {
+    name: "upgrade invocation in a generic runtime caller",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: "@@\n+await upgrade(existingRows);",
+    },
+    surfaces: ["migration/backfill/repair: src/runtime/startup.ts"],
+  },
+  {
+    name: "upgrade invocation in a dynamic error message",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: "@@\n+throw new Error(`Upgrade result: ${upgrade(existingRows)}`);",
+    },
+    surfaces: ["migration/backfill/repair: src/runtime/startup.ts"],
+  },
+  {
+    name: "upgrade invocation after a static error message",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: '@@\n+throw new Error("Upgrade the host.", { cause: upgrade(existingRows) });',
+    },
+    surfaces: ["migration/backfill/repair: src/runtime/startup.ts"],
+  },
+  {
+    name: "upgrade call mentioned only in a static error message",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: '@@\n+throw new Error("Call upgrade() to update the host.");',
+    },
+    surfaces: [],
+  },
+  {
+    name: "upgrade guidance in a static template error message",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: "@@\n+throw new Error(`Upgrade the host.`);",
+    },
+    surfaces: [],
+  },
+  {
+    name: "upgrade guidance with an unchanged multiline Error constructor",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: '@@\n throw new Error(\n-  "Host unsupported.",\n+  "Upgrade the host.",\n );',
+    },
+    surfaces: [],
+  },
+  {
+    name: "upgrade guidance in callable Error",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: '@@\n+throw Error("Upgrade the host.");',
+    },
+    surfaces: [],
+  },
+  {
+    name: "upgrade invocation with same-hunk persistence evidence",
+    file: {
+      filename: "src/runtime/startup.ts",
+      patch: "@@\n const state = JSON.parse(readFile(statePath));\n+await upgrade(state);",
+    },
+    surfaces: ["migration/backfill/repair: src/runtime/startup.ts"],
+  },
+  {
+    name: "upgrade implementation with explicit migration ownership",
+    file: {
+      filename: "src/migrations/upgrade.ts",
+      patch: "@@\n+await upgrade(records);",
+    },
+    surfaces: ["migration/backfill/repair: src/migrations/upgrade.ts"],
+  },
+  {
+    name: "upgrade persistence documentation",
+    file: {
+      filename: "docs/reference/runtime.md",
+      patch: "@@\n+The database schema now requires an upgrade of existing rows.",
+    },
+    surfaces: ["migration/backfill/repair: docs/reference/runtime.md"],
+  },
   {
     name: "doctor persistence documentation",
     file: {
