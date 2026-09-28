@@ -143,9 +143,8 @@ behavior; it does not gain a separate hydrator. Context-only callers that do not
 request a Git checkout do no source preparation. OpenClaw Bay is unaffected:
 no observer fields, routes, or controls change.
 
-The deployed review artifact contains compiled JavaScript, runtime libraries,
-and matching configuration, prompts, and schemas. TypeScript is a build
-dependency; review shards neither load nor install a compiler. Historical
+Each exact-review workflow builds its runtime from its pinned checkout. The
+old planner-built runtime archive and matrix review consumers are retired. Historical
 `review_semantic_*` report fields are ignored and disappear when a full review
 replaces the report. Existing reports keep their normal freshness deadline;
 this change does not trigger a fleet-wide re-review.

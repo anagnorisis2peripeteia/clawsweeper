@@ -11,6 +11,7 @@ import {
   reviewFailureDecisionFingerprint,
 } from "./exact-review-observed-failure.ts";
 import {
+  agentInputScanFailureReason,
   terminalReviewFailureReason,
   type TerminalReviewFailureReason as ExactReviewFailureReason,
 } from "../src/exact-review-failure-reason.ts";
@@ -295,6 +296,7 @@ type ExactReviewParkedReason =
   | "dispatch_rejected"
   | "review_retry_exhausted"
   | "source_incompatible"
+  | "scanner_refused"
   | "direct_publication";
 type ExactReviewLifecycleProjectionIdentity = {
   canonicalTargetKey: string;
@@ -386,6 +388,7 @@ export type ExactReviewQueueItem = {
   reviewFailure?: PublicReviewFailure;
   reviewFailureDecisionFingerprint?: string;
   reviewRetryPolicyEpoch?: string;
+  scannerRefusal?: { observedAt: number; runId: string };
   reviewRecoveryReason?: ExactReviewReviewRecoveryReason;
   reviewRecoveryAt?: number;
   /**
@@ -732,7 +735,7 @@ type ExactReviewScheduledDisposition =
       deduped: true;
       item_key: string;
       dedupe_scope: "scheduled_queue_item";
-      dedupe_reason: "item_already_pending_or_active" | "source_incompatible";
+      dedupe_reason: "item_already_pending_or_active" | "source_incompatible" | "scanner_refused";
     }
   | {
       ok: true;
@@ -1751,6 +1754,7 @@ export class ExactReviewQueue {
       }
       if (!decision) return json({ error: "invalid_exact_review_item" }, 400);
       const manualAdmission = decision.sourceAction === MANUAL_REVIEW_SOURCE_ACTION;
+      if (manualAdmission) decision.sourceDeliveryId = deliveryId;
       if (
         manualAdmission &&
         String(this.env.EXACT_REVIEW_MANUAL_PUBLICATION_ENABLED ?? "") !== "1"
@@ -1937,7 +1941,13 @@ export class ExactReviewQueue {
           exactReviewHeartbeatGraceMs(this.env),
           this.env,
         );
-        const key = exactReviewItemKey(decision);
+        const scannerHold = !decision.publication
+          ? Object.keys(state.items)
+              .filter((key) => key.toLowerCase() === exactReviewItemKey(decision).toLowerCase())
+              .map((key) => state.items[key])
+              .find((item) => item.parkedReason === "scanner_refused")
+          : undefined;
+        const key = scannerHold?.key ?? exactReviewItemKey(decision);
         const currentIngressItem = state.items[key];
         // A counterpart receipt is conclusive only after its own route reached
         // queue state. Preserve the one live fallback-first item for a verified
@@ -2136,7 +2146,25 @@ export class ExactReviewQueue {
           }
         }
         const current = state.items[key];
-        if (current && scheduledLane) {
+        const releasesScannerHold = Boolean(
+          scannerHold &&
+          (freshScannerRefusalRetry(
+            decision,
+            deliveryId,
+            scannerHold.scannerRefusal,
+            scannerHold.decision,
+          ) ||
+            ((scannerHold.reviewRetryPolicyEpoch || DEFAULT_EXACT_REVIEW_RETRY_POLICY_EPOCH) !==
+              exactReviewRetryPolicyEpoch(this.env) &&
+              !exactReviewDecisionHasCommandContext(decision) &&
+              decision.sourceAction !== "re_review" &&
+              !manualAdmission)),
+        );
+        if (scannerHold && !releasesScannerHold && !scheduledLane) {
+          this.writeStateSync(state);
+          return { scannerRefused: true as const, state };
+        }
+        if (current && scheduledLane && !releasesScannerHold) {
           this.writeStateSync(state);
           const disposition: ExactReviewScheduledDisposition = {
             ok: true,
@@ -2144,8 +2172,9 @@ export class ExactReviewQueue {
             item_key: key,
             dedupe_scope: "scheduled_queue_item",
             dedupe_reason:
-              current.parkedReason === "source_incompatible"
-                ? "source_incompatible"
+              current.parkedReason === "source_incompatible" ||
+              current.parkedReason === "scanner_refused"
+                ? current.parkedReason
                 : "item_already_pending_or_active",
           };
           return {
@@ -2164,7 +2193,7 @@ export class ExactReviewQueue {
         let supersededRunId: string | null = null;
         let supersessionAudit: ExactReviewSupersessionAudit | null = null;
         let ingressAdmitted = false;
-        if (current) {
+        if (current && !releasesScannerHold) {
           const ignoredRecovery = isLowPriorityExactReviewDecision(decision);
           // A recovery is only a one-shot repair of a failed shard. It may create a queue item,
           // but must never supersede an existing pending, dispatching, or leased decision: doing
@@ -2467,8 +2496,8 @@ export class ExactReviewQueue {
             ...(ingress ? { ingressFingerprint: ingress.fingerprint } : {}),
             state: "pending",
             revision: exactReviewDecisionHasCommandContext(decision)
-              ? this.nextExactReviewCommandRevisionSync(key, 1)
-              : this.nextExactReviewItemRevisionSync(key),
+              ? this.nextExactReviewCommandRevisionSync(key, (scannerHold?.revision ?? 0) + 1)
+              : this.nextExactReviewItemRevisionSync(key, (scannerHold?.revision ?? 0) + 1),
             createdAt: now,
             updatedAt: now,
             ...exactReviewQueueDebouncedAttempt(state, decision, now, now, this.env, true),
@@ -2545,6 +2574,9 @@ export class ExactReviewQueue {
         };
       });
       if (deferredBayLifecycle) this.syncBayLifecycle(deferredBayLifecycle);
+      if ("scannerRefused" in accepted) {
+        return json({ ok: true, accepted: false, reason: "scanner_refused" }, 202);
+      }
       if ("conflict" in accepted && accepted.conflict) {
         return json({ error: "exact_review_delivery_conflict" }, 409);
       }
@@ -3310,7 +3342,9 @@ export class ExactReviewQueue {
       // A pinned-source refusal remains discoverable for source recovery, but
       // retaining its queue row must not turn its terminal failure into a retry.
       const parkedForRetry =
-        Boolean(completionResult.parked) && item.parkedReason !== "source_incompatible";
+        Boolean(completionResult.parked) &&
+        item.parkedReason !== "source_incompatible" &&
+        item.parkedReason !== "scanner_refused";
       const lifecycleIdentity: ExactReviewLifecycleProjectionIdentity = {
         canonicalTargetKey: `${lifecycleItem.decision.targetRepo}#${lifecycleItem.decision.itemNumber}`,
         fenceKey: lifecycleItem.key,
@@ -15599,6 +15633,51 @@ function exactReviewRetryIdentityChanged(
   return priorEpoch !== activeEpoch || exactReviewInputIdentityChanged(priorDecision, nextDecision);
 }
 
+function freshScannerRefusalRetry(
+  decision: ExactReviewDecision,
+  deliveryId: string | undefined,
+  refusal: ExactReviewQueueItem["scannerRefusal"],
+  refusedDecision: ExactReviewDecision,
+) {
+  if (!refusal) return false;
+  if (decision.sourceAction === "re_review") {
+    const requestedAt = Date.parse(decision.sourceCommentUpdatedAt || "");
+    const failedCommandAt = Date.parse(refusedDecision.sourceCommentUpdatedAt || "");
+    return (
+      decision.sourceCommentVerified === true &&
+      Boolean(
+        decision.commandStatusMarker &&
+        decision.sourceCommentId &&
+        decision.commandBodyDigest &&
+        decision.commandOrigin,
+      ) &&
+      // GitHub truncates timestamps to seconds; a tie cannot prove that the
+      // command followed the refusal, regardless of comment ID or producer.
+      requestedAt >
+        Math.max(refusal.observedAt, Number.isFinite(failedCommandAt) ? failedCommandAt : 0)
+    );
+  }
+  // Manual workflow reruns retain their run id; only a newly dispatched,
+  // explicitly selected item may release a refusal from an older run. Opaque
+  // API request IDs instead identify a new explicit request; retain the failed
+  // delivery on its decision so replay stays blocked after receipt expiry.
+  const manualRun = deliveryId?.match(/^manual:([A-Za-z0-9_.:-]{1,150}):([1-9]\d*)$/);
+  return (
+    decision.sourceAction === MANUAL_REVIEW_SOURCE_ACTION &&
+    decisionPublicationPolicy(decision) === RECORD_COMMENT_ONLY &&
+    Boolean(
+      manualRun &&
+      manualRun[2] === String(decision.itemNumber) &&
+      deliveryId !== refusedDecision.sourceDeliveryId &&
+      (/^\d+$/.test(manualRun[1])
+        ? /^\d+$/.test(refusal.runId) && BigInt(manualRun[1]) > BigInt(refusal.runId)
+        : refusedDecision.sourceAction !== MANUAL_REVIEW_SOURCE_ACTION ||
+          (Boolean(refusedDecision.sourceDeliveryId) &&
+            deliveryId !== refusedDecision.sourceDeliveryId)),
+    )
+  );
+}
+
 function finishExactReviewQueueItem(
   state: ExactReviewQueueState,
   item: ExactReviewQueueItem,
@@ -15617,6 +15696,34 @@ function finishExactReviewQueueItem(
   }
   const retryingFailure = outcome !== "success" && reviewFailureReason === undefined;
   const hasNewerRevision = item.revision > Number(item.leaseRevision || 0);
+  if (outcome !== "success" && agentInputScanFailureReason(reviewFailureReason)) {
+    const refusal = { observedAt: now, runId: item.claimedRunId || "" };
+    const freshSuccessor =
+      hasNewerRevision &&
+      freshScannerRefusalRetry(
+        item.decision,
+        item.admissionDeliveryId,
+        refusal,
+        item.leaseDecision ?? item.decision,
+      );
+    if (!freshSuccessor) {
+      // Automatic source drift cannot escape a terminal refusal. Keep the
+      // failed source for diagnosis; release replaces it instead of merging
+      // its command authority into the next review.
+      item.decision = item.leaseDecision ?? item.decision;
+      item.scannerRefusal = refusal;
+      clearExactReviewLease(item);
+      item.state = "parked";
+      item.parkedReason = "scanner_refused";
+      item.parkedRecoveryAt = undefined;
+      item.backoffReason = undefined;
+      item.firstFailureAt ??= now;
+      item.updatedAt = now;
+      item.reviewFailure = { stage: "agent_input_scan", reason: reviewFailureReason! };
+      item.reviewFailureDecisionFingerprint = reviewFailureDecisionFingerprint(item.decision);
+      return { requeued: false, parked: true };
+    }
+  }
   const activeRetryPolicyEpoch = exactReviewRetryPolicyEpoch(env);
   const retryPolicyChanged =
     (item.reviewRetryPolicyEpoch || DEFAULT_EXACT_REVIEW_RETRY_POLICY_EPOCH) !==
@@ -17003,7 +17110,8 @@ function exactReviewScheduledDispositionFromJson(
       /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9]\d*$/.test(body.item_key) &&
       body.dedupe_scope === "scheduled_queue_item" &&
       (body.dedupe_reason === "item_already_pending_or_active" ||
-        body.dedupe_reason === "source_incompatible")
+        body.dedupe_reason === "source_incompatible" ||
+        body.dedupe_reason === "scanner_refused")
     ) {
       disposition = {
         ok: true,
