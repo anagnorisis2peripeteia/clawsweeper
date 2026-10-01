@@ -392,6 +392,12 @@ export type ExactReviewQueueItem = {
   reviewRecoveryReason?: ExactReviewReviewRecoveryReason;
   reviewRecoveryAt?: number;
   /**
+   * A scheduled admission already debited the global review budget for this
+   * item's next claimed review execution. That claim consumes the marker
+   * instead of debiting again; every later claim is charged.
+   */
+  reviewBudgetPrepaid?: true;
+  /**
    * A terminal outcome already committed for this revision. This retains only
    * the status acknowledgement retry driver; it never re-enters publication.
    */
@@ -2338,8 +2344,7 @@ export class ExactReviewQueue {
               current.state = "pending";
               current.createdAt = now;
               current.parkedReason = undefined;
-              // Replacing an active owner admits another organic input.
-              if (!decision.publication) this.consumeScheduledReviewCapacitySync(now);
+              // The successor is charged when its own review lease is claimed.
             }
             const mergeable = current.state === "pending" || current.state === "parked";
             const priorParkedRecoveryAt = exactReviewParkedRecoveryAt(current);
@@ -2492,14 +2497,14 @@ export class ExactReviewQueue {
               ),
             };
           }
-          if (!decision.publication && !scheduledLane) {
-            this.consumeScheduledReviewCapacitySync(now);
-          }
+          // Organic admission is free: its review is charged when claimed. A
+          // scheduled admission already debited the global bucket above.
           state.items[key] = {
             key,
             decision,
             admissionDeliveryId: deliveryId,
             ...(ingress ? { ingressFingerprint: ingress.fingerprint } : {}),
+            ...(scheduledLane ? { reviewBudgetPrepaid: true as const } : {}),
             state: "pending",
             revision: exactReviewDecisionHasCommandContext(decision)
               ? this.nextExactReviewCommandRevisionSync(key, (scannerHold?.revision ?? 0) + 1)
@@ -2817,6 +2822,10 @@ export class ExactReviewQueue {
       item.leaseHeartbeatAt = undefined;
       item.claimedAt = now;
       item.updatedAt = now;
+      // Only a new claim generation starts an execution. Same-attempt claim
+      // retries return above, and this debit is written in the same
+      // synchronous turn as the lease, so each generation is charged once.
+      this.chargeClaimedReviewExecutionSync(item, now);
       await this.writeState(state);
       this.recordLifecycleClaim(item, now);
       await this.scheduleNext(state, now);
@@ -3290,9 +3299,6 @@ export class ExactReviewQueue {
             ? Number(item.publicationFailureAttempts || 0)
             : Number(item.publicationFailureAttempts || 0) + 1
           : 0;
-      // Capture the input identity before finishing clears the lease decision.
-      const requeueChargesOrganicExecution =
-        !directLifecycleRequeue && exactReviewRequeueNeedsBudgetDebit(item, requeueLatest);
       const completionResult = directLifecycleRequeue
         ? item.revision > leaseRevision
           ? finishExactReviewPublicationQueueItem({
@@ -3429,9 +3435,6 @@ export class ExactReviewQueue {
           : null;
       if (!publicationItem && retryKind === "throttle") {
         this.deferScheduledReviewAdmissionForThrottleSync(now, requestedRetryAt ?? 0);
-      }
-      if (requeueChargesOrganicExecution && completionResult.requeued) {
-        this.consumeScheduledReviewCapacitySync(now);
       }
       // A successful workflow can still request requeue_latest after source
       // drift. That work did not leave its lane, so it must not improve the
@@ -4645,8 +4648,6 @@ export class ExactReviewQueue {
             observedAt: now,
           });
         }
-        const requeueNeedsBudgetDebit =
-          !owedDirectLifecycleRequeue && exactReviewRequeueNeedsBudgetDebit(item);
         const { requeued: didRequeue, parked } = owedDirectLifecycleRequeue
           ? this.requeueDirectLifecyclePublicationSync(state, item, now)
           : finishExactReviewQueueItem(
@@ -4664,7 +4665,6 @@ export class ExactReviewQueue {
         reconciled += 1;
         if (parked) continue;
         if (didRequeue) {
-          if (requeueNeedsBudgetDebit) this.consumeScheduledReviewCapacitySync(now);
           requeued += 1;
           if (!exactReviewQueueIsPublication(item) && run.outcome !== "success") {
             retriedReviews += 1;
@@ -12079,6 +12079,23 @@ export class ExactReviewQueue {
     return admitted;
   }
 
+  // The review budget meters executions, not admissions: superseded,
+  // coalesced, deduped and terminal-before-claim work never debits it.
+  private chargeClaimedReviewExecutionSync(item: ExactReviewQueueItem, now: number) {
+    // Publications and acknowledgement-only finalizers run no review.
+    if (
+      exactReviewQueueIsPublication({ decision: item.leaseDecision ?? item.decision }) ||
+      item.terminalFinalization
+    ) {
+      return;
+    }
+    if (item.reviewBudgetPrepaid) {
+      delete item.reviewBudgetPrepaid;
+      return;
+    }
+    this.consumeScheduledReviewCapacitySync(now);
+  }
+
   private consumeScheduledReviewCapacitySync(now: number) {
     const global = this.scheduledReviewBucketSync("global", now);
     this.storage.kv.put(exactReviewScheduledFeedKey("global"), {
@@ -15699,16 +15716,6 @@ function exactReviewInputIdentityChanged(
     stableJson(exactReviewProofAllowedScenarios(priorDecision)) !==
       stableJson(exactReviewProofAllowedScenarios(nextDecision)) ||
     commandIdentity(priorDecision) !== commandIdentity(nextDecision)
-  );
-}
-
-function exactReviewRequeueNeedsBudgetDebit(item: ExactReviewQueueItem, requeueLatest = false) {
-  return (
-    !exactReviewQueueIsPublication(item) &&
-    !exactReviewScheduledLane(item.decision) &&
-    (requeueLatest ||
-      (item.revision > Number(item.leaseRevision || 0) &&
-        exactReviewInputIdentityChanged(item.leaseDecision ?? item.decision, item.decision)))
   );
 }
 
