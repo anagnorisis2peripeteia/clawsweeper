@@ -651,26 +651,41 @@ function exactUriFixtureTests(
   name: string,
   source: string,
   makeFixture: () => ReturnType<typeof autoreviewFixtures>[number],
+  options: {
+    admittedChanges?: readonly ("add" | "remove" | "context")[];
+    mutationChange?: "add" | "remove" | "context";
+  } = {},
 ) {
   for (const change of ["add", "remove", "context"] as const) {
-    test(name + " fixture admits exact Git-generated " + change + " attribution", (t) => {
-      const patch = fixturePatch(t, source, [makeFixture()], change);
-      for (const decoder of makeFixture().decoders) {
-        const result = patch.classify(decoder);
-        assert.equal(result.kind, "classified", JSON.stringify(result));
-        if (result.kind !== "classified") continue;
-        assert.ok(result.notices.every((notice) => notice.source === source));
-        const findings = result.notices.flatMap((notice) => notice.findings);
-        assert.ok(findings.some((finding) => finding.patch));
-        assert.ok(findings.every((finding) => finding.decoder === decoder));
-        if (change === "context") {
-          assert.ok(findings.some((finding) => finding.role === "base"));
-          assert.ok(findings.some((finding) => finding.role === "head"));
-        } else {
-          assert.ok(findings.every((finding) => finding.role === patch.role));
+    const admitted = options.admittedChanges?.includes(change) ?? true;
+    test(
+      name +
+        ` fixture ${admitted ? "admits" : "refuses"} exact Git-generated ` +
+        change +
+        " attribution",
+      (t) => {
+        const patch = fixturePatch(t, source, [makeFixture()], change);
+        for (const decoder of makeFixture().decoders) {
+          const result = patch.classify(decoder);
+          if (!admitted) {
+            assert.equal(result.kind, "refused", JSON.stringify(result));
+            continue;
+          }
+          assert.equal(result.kind, "classified", JSON.stringify(result));
+          if (result.kind !== "classified") continue;
+          assert.ok(result.notices.every((notice) => notice.source === source));
+          const findings = result.notices.flatMap((notice) => notice.findings);
+          assert.ok(findings.some((finding) => finding.patch));
+          assert.ok(findings.every((finding) => finding.decoder === decoder));
+          if (change === "context") {
+            assert.ok(findings.some((finding) => finding.role === "base"));
+            assert.ok(findings.some((finding) => finding.role === "head"));
+          } else {
+            assert.ok(findings.every((finding) => finding.role === patch.role));
+          }
         }
-      }
-    });
+      },
+    );
   }
   for (const variant of [
     "literal",
@@ -697,7 +712,12 @@ function exactUriFixtureTests(
         variant === "extra-occurrence"
           ? [entry, { ...entry, line: entry.line + " // extra" }]
           : [entry];
-      const patch = fixturePatch(t, variant === "path" ? source + ".other" : source, entries);
+      const patch = fixturePatch(
+        t,
+        variant === "path" ? source + ".other" : source,
+        entries,
+        options.mutationChange,
+      );
       if (variant === "mode" || variant === "role" || variant === "revision") {
         for (const [file, input] of patch.inputs) {
           if (input.kind !== "blob") continue;
@@ -730,10 +750,9 @@ function exactUriFixtureTests(
 }
 
 exactUriFixtureTests(
-  "Existing OCE proxy URL rejection",
+  "Historical OCE proxy URL rejection",
   "tests/conformance/kubernetes-compute.test.mjs",
   () => {
-    // Reconstruct the rejected synthetic URI without introducing another scanner literal.
     const raw = ["https://", "operator", ":", "secret", "@", "10.42.0.15:3128"].join("");
     return {
       raw,
@@ -742,13 +761,13 @@ exactUriFixtureTests(
       decoders: ["PLAIN"],
     };
   },
+  { admittedChanges: [], mutationChange: "remove" },
 );
 
 exactUriFixtureTests(
-  "Existing OCE API URL rejection",
+  "Historical OCE API URL rejection",
   "tests/conformance/kubernetes-compute.test.mjs",
   () => {
-    // Native URI matching omits the single-digit port; the whole-line witness retains it.
     const raw = ["https://", "user", ":", "password", "@", "127.0.0.1"].join("");
     return {
       raw,
@@ -757,7 +776,46 @@ exactUriFixtureTests(
       decoders: ["PLAIN"],
     };
   },
+  { admittedChanges: [], mutationChange: "remove" },
 );
+
+test("Historical OCE URI fixture admits only an exact reviewed source blob", (t) => {
+  const source = "tests/conformance/kubernetes-compute.test.mjs";
+  const raw = ["https://", "operator", ":", "secret", "@", "10.42.0.15:3128"].join("");
+  const entry = {
+    raw,
+    rawV2: raw,
+    line: '    "' + raw + '",',
+    decoders: ["PLAIN"] as const,
+  };
+  const fixture = fixturePatch(t, source, [entry], "remove");
+  const hash = (bytes: string | Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+  const reviewedInput = [...fixture.inputs.values()].find(
+    (input) => input.kind === "blob" && input.bytes?.includes(raw),
+  );
+  assert.equal(reviewedInput?.kind, "blob");
+  assert.ok(reviewedInput.bytes);
+  const reviewedAttributions: ReviewedAttribution[] = [
+    [
+      17,
+      "URI",
+      "PLAIN",
+      hash(raw),
+      hash(raw),
+      hash(entry.line),
+      source,
+      "100644",
+      [hash(reviewedInput.bytes)],
+    ],
+  ];
+  const classified = fixture.classify("PLAIN", {}, { blobOnly: true, reviewedAttributions });
+  assert.equal(classified.kind, "classified", JSON.stringify(classified));
+
+  reviewedInput.bytes = Buffer.concat([reviewedInput.bytes, Buffer.from("# unrelated change\n")]);
+  const refused = fixture.classify("PLAIN", {}, { blobOnly: true, reviewedAttributions });
+  assert.equal(refused.kind, "refused", JSON.stringify(refused));
+  if (refused.kind === "refused") assert.equal(refused.diagnostic.reason, "source_not_reviewed");
+});
 
 function catalogIconUriFixture(): ReturnType<typeof autoreviewFixtures>[number] {
   const raw = ["https://", "user", ":", "password", "@", "cdn.example.com"].join("");
