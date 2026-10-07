@@ -144,7 +144,13 @@ export function parseMaintainerDecision(
     if (kind === "none") throw new Error(`${path}.kind must identify the required decision`);
     if (!question) throw new Error(`${path}.question must not be empty`);
     if (!rationale) throw new Error(`${path}.rationale must not be empty`);
-    if (options.length === 0) throw new Error(`${path}.options must contain at least 1 option`);
+    if (options.length < 2) throw new Error(`${path}.options must contain at least 2 options`);
+    const optionKeys = options.map((option) =>
+      JSON.stringify([option.title.toLowerCase(), option.body.toLowerCase()]),
+    );
+    if (new Set(optionKeys).size !== options.length) {
+      throw new Error(`${path}.options must contain distinct options`);
+    }
     if (options.filter((option) => option.recommended).length !== 1) {
       throw new Error(`${path}.options must contain exactly 1 recommended option`);
     }
@@ -264,7 +270,12 @@ export function buildDecisionPacketFromReport(
 }
 
 export function renderDecisionPacketPublicBlock(markdown: string): string {
-  const packet = buildDecisionPacketFromReport(markdown);
+  let packet: DecisionPacket | null;
+  try {
+    packet = buildDecisionPacketFromReport(markdown);
+  } catch {
+    return "The stored maintainer decision is invalid. Run a fresh review before resolving it.";
+  }
   if (!packet) return "";
   const recommendation = packet.options.find((option) => option.recommended);
   const tableCell = (value: string) =>
@@ -302,12 +313,19 @@ export function renderDecisionPacketPublicBlock(markdown: string): string {
 export function syncDecisionPacketRecord(
   options: DecisionPacketSyncOptions,
 ): DecisionPacketSyncResult {
-  const packet = buildDecisionPacketFromReport(options.markdown, {
-    reportPath: repoRelativePath(options.repoRoot, options.reportPath),
-    ...(options.generatedAt ? { generatedAt: options.generatedAt } : {}),
-    ...(options.reportUrl ? { reportUrl: options.reportUrl } : {}),
-    ...(options.subjectState ? { subjectState: options.subjectState } : {}),
-  });
+  let packet: DecisionPacket | null;
+  try {
+    packet = buildDecisionPacketFromReport(options.markdown, {
+      reportPath: repoRelativePath(options.repoRoot, options.reportPath),
+      ...(options.generatedAt ? { generatedAt: options.generatedAt } : {}),
+      ...(options.reportUrl ? { reportUrl: options.reportUrl } : {}),
+      ...(options.subjectState ? { subjectState: options.subjectState } : {}),
+    });
+  } catch {
+    // Legacy decisions can fail current validation. Drop only the derived
+    // sidecar; keep the report's invalid decision and its fresh-review hold.
+    packet = null;
+  }
   const frontmatter = readFrontMatter(options.markdown);
   const reportNumber = reportNumberFromPath(options.reportPath);
   const metadataNumber = frontmatter.ambiguous ? null : numberValue(frontmatter.values.number);
