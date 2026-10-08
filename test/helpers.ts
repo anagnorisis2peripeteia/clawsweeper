@@ -43,6 +43,7 @@ export function closeDecision(overrides = {}) {
     confidence: "high",
     summary: "Current main already implements this.",
     changeSummary: "Requests confirmation that the feature works on current main.",
+    changeExample: { scenario: "", before: "", after: "" },
     systemContext: "",
     architectureDiagram: "",
     evidence: [
@@ -142,6 +143,20 @@ export function closeDecision(overrides = {}) {
       applied: true,
       status: "found_applied",
       summary: "Found AGENTS.md and applied relevant repository review guidance.",
+    },
+    productReview: {
+      kind: "not_applicable",
+      userProblem: "",
+      fixScope: "not_applicable",
+      worthIt: "not_applicable",
+      reason: "Product review does not apply to this issue cleanup decision.",
+    },
+    provenance: [],
+    testingReview: {
+      proofPath: "not_applicable",
+      addedTestFiles: 0,
+      lowValueTests: [],
+      missingE2e: "",
     },
     reviewFindings: [],
     securityReview: {

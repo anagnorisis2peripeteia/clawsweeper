@@ -11,6 +11,7 @@ import {
   reviewDecisionSchemaText,
   reviewPromptForTest,
   reviewPromptTelemetryForTest,
+  reviewPolicyHashForTest,
   reviewPromptTemplate,
   extractLatestClawSweeperReviewForTest,
   filterReviewContextCommentsForTest,
@@ -94,7 +95,9 @@ test("GitHub review context omits complete reviewed URI quotations and preserves
   assert.equal(JSON.stringify(context), original);
   assert.equal(prompt.split("## Maintainer Request\n\n")[1]?.trim(), additionalPrompt);
   const introduction =
-    prompt.match(/\n\n## PR Introduction Evidence\n[\s\S]*?\n\x60{3}\n/)?.[0] ?? "";
+    prompt.match(
+      /\n\n## PR Introduction Evidence\n[\s\S]*?\n\x60{3}\n\n## Provenance Evidence\n[\s\S]*?\n\x60{3}\n/,
+    )?.[0] ?? "";
   assert.equal(
     reviewPromptTelemetryForTest(target, context, git).contextChars,
     jsonText.length + introduction.length,
@@ -134,7 +137,9 @@ for (const kind of ["issue", "pull_request"] as const) {
     assert.doesNotMatch(prompt, new RegExp(scriptSentinel));
     assert.doesNotMatch(prompt, /PERSISTENCE_ONLY_|prHydrationSnapshot|pullCommitsRevision/);
     const introduction =
-      prompt.match(/\n\n## PR Introduction Evidence\n[\s\S]*?\n```\n/)?.[0] ?? "";
+      prompt.match(
+        /\n\n## PR Introduction Evidence\n[\s\S]*?\n```\n\n## Provenance Evidence\n[\s\S]*?\n```\n/,
+      )?.[0] ?? "";
     assert.equal(
       reviewPromptTelemetryForTest(target, context, git).contextChars,
       jsonText.length + introduction.length,
@@ -743,4 +748,35 @@ test("PR prompt omits only source patch fields without mutating policy evidence"
   assert.equal(JSON.stringify(context), original);
   const issuePrompt = reviewPromptForTest(item({ kind: "issue" }), context, git);
   assert.ok(issuePrompt.includes("SOURCE_PATCH_SENTINEL"));
+});
+
+test("PR prompts carry the review rules after the static template; issue prompts do not", () => {
+  const rules = readFileSync("instructions/pr-review-rules.md", "utf8").trim();
+  const context = {
+    issue: { number: 123, title: "Sample item" },
+    comments: [],
+    timeline: [],
+    counts: { comments: 0, timeline: 0 },
+  };
+  const prompt = reviewPromptForTest(item({ kind: "pull_request" }), context, git);
+  const rulesSection = `\n\n## Review Rules\n\n${rules}\n\n## Repository State\n`;
+  assert.ok(prompt.startsWith(reviewPromptTemplate()));
+  assert.ok(prompt.includes(rulesSection));
+  assert.equal(
+    prompt.indexOf(rulesSection),
+    reviewPromptTemplate().length,
+    "rules follow the static template",
+  );
+  const issuePrompt = reviewPromptForTest(item({ kind: "issue" }), context, git);
+  assert.ok(!issuePrompt.includes(rules));
+  assert.ok(!issuePrompt.includes("\n\n## Review Rules\n\n"));
+});
+
+test("review policy hash changes when the review rules change", () => {
+  const rules = readFileSync("instructions/pr-review-rules.md", "utf8");
+  assert.equal(reviewPolicyHashForTest({}, rules), reviewPolicyHashForTest());
+  assert.notEqual(
+    reviewPolicyHashForTest({}, `${rules}\nOne more rule.\n`),
+    reviewPolicyHashForTest(),
+  );
 });

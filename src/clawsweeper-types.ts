@@ -8,6 +8,7 @@ import type {
 } from "./review-history.js";
 import type { ReviewStructuralRecord } from "./review-structural-cache.js";
 import type { PrHydrationSnapshot } from "./pr-hydration-snapshot.js";
+import type { ProvenanceEvidence } from "./pr-review-provenance.js";
 import type { SchedulerDueCandidate } from "./scheduler-policy.js";
 
 /** Shared ClawSweeper domain, review, scheduling, and dashboard shapes. */
@@ -120,6 +121,29 @@ export type RealBehaviorProofEvidenceKind =
   | "none"
   | "not_applicable";
 export type PrRatingTier = "S" | "A" | "B" | "C" | "D" | "F" | "NA";
+export type ProductReviewKind =
+  | "bug_fix"
+  | "preference"
+  | "feature"
+  | "refactor"
+  | "performance"
+  | "test_only"
+  | "docs"
+  | "maintenance"
+  | "not_applicable";
+export type ProductFixScope = "complete" | "partial" | "not_applicable";
+export type ProductWorthIt = "yes" | "no" | "needs_maintainer" | "not_applicable";
+export type ProvenanceVerdict =
+  | "respects"
+  | "overrides_with_reason"
+  | "overrides_without_reason"
+  | "unknown";
+export type TestingProofPath =
+  | "shipped_entry_point"
+  | "in_process_harness"
+  | "unit_only"
+  | "none"
+  | "not_applicable";
 export type PrStatusLabelKind =
   | "automerge_armed"
   | "re_review_loop"
@@ -424,6 +448,39 @@ export interface PrRating {
   nextSteps: string[];
 }
 
+export interface ChangeExample {
+  scenario: string;
+  before: string;
+  after: string;
+}
+
+export interface ProductReview {
+  kind: ProductReviewKind;
+  userProblem: string;
+  fixScope: ProductFixScope;
+  worthIt: ProductWorthIt;
+  reason: string;
+}
+
+export interface ProvenanceEntry {
+  area: string;
+  introducedBy: string;
+  originalReason: string;
+  verdict: ProvenanceVerdict;
+}
+
+export interface LowValueTest {
+  file: string;
+  reason: string;
+}
+
+export interface TestingReview {
+  proofPath: TestingProofPath;
+  addedTestFiles: number;
+  lowValueTests: LowValueTest[];
+  missingE2e: string;
+}
+
 export interface TelegramVisibleProof {
   status: TelegramVisibleProofStatus;
   summary: string;
@@ -575,6 +632,7 @@ export interface Decision {
   confidence: Confidence;
   summary: string;
   changeSummary: string;
+  changeExample: ChangeExample;
   systemContext: string;
   architectureDiagram: string;
   evidence: Evidence[];
@@ -604,6 +662,9 @@ export interface Decision {
   autoImplementationCandidate: AutoImplementationCandidate;
   rootCauseCluster: RootCauseClusterAssessment;
   agentsPolicyStatus: AgentsPolicyStatus;
+  productReview: ProductReview;
+  provenance: ProvenanceEntry[];
+  testingReview: TestingReview;
   reviewFindings: ReviewFinding[];
   securityReview: SecurityReview;
   realBehaviorProof: RealBehaviorProof;
@@ -786,6 +847,8 @@ export interface ReviewPromptRuntimeHints {
   proofScratchDir?: string;
   mediaProofManifestPath?: string;
   mediaProofSummary?: string;
+  // Host-computed before the review; pull request prompts render it as evidence.
+  provenanceEvidence?: ProvenanceEvidence;
 }
 
 export interface DashboardItem {

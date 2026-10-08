@@ -138,6 +138,7 @@ export function oversizedPullRequestDecision(
     ...(source ? { oversizedPullRequestSource: source } : {}),
     summary: `Pull request changes ${size.additions + size.deletions} lines, exceeding the ${size.threshold}-line review limit.`,
     changeSummary: unassessed,
+    changeExample: { scenario: "", before: "", after: "" },
     systemContext: "",
     architectureDiagram: "",
     evidence: [
@@ -189,6 +190,20 @@ export function oversizedPullRequestDecision(
       applied: false,
       status: "unreadable_or_unclear",
       summary: unassessed,
+    },
+    productReview: {
+      kind: "not_applicable",
+      userProblem: "",
+      fixScope: "not_applicable",
+      worthIt: "not_applicable",
+      reason: unassessed,
+    },
+    provenance: [],
+    testingReview: {
+      proofPath: "not_applicable",
+      addedTestFiles: 0,
+      lowValueTests: [],
+      missingE2e: "",
     },
     reviewFindings: [],
     securityReview: { status: "not_applicable", summary: unassessed, concerns: [] },

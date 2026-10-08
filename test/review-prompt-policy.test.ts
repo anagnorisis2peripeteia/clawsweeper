@@ -1086,18 +1086,19 @@ test("media proof URL discovery excludes persistence-only hydration snapshots", 
   assert.deepEqual(proofMediaUrlsFromContextForTest(context), []);
 });
 
-test("review prompt keeps draft and protected workflow state out of PR rank", () => {
-  const prompt = readFileSync("prompts/review-item.md", "utf8");
+test("review rules keep draft and protected workflow state out of PR rank", () => {
+  const rules = readFileSync("instructions/pr-review-rules.md", "utf8");
 
-  assert.match(prompt, /Rate PR evidence\s+and patch quality/);
-  assert.match(prompt, /weaker proof-or-patch quality signal/);
+  assert.match(rules, /Rate the\s+evidence and the patch, not the contributor/);
+  assert.match(rules, /`overallTier` is the weaker of `proofTier` and `patchTier`/);
   assert.match(
-    prompt,
-    /Do not lower `proofTier`, `patchTier`,\s+or `overallTier` solely because the PR is draft/,
+    rules,
+    /A draft state, protected labels, automerge eligibility,\s+or a pending maintainer action is workflow state\. These never lower a\s+tier\./,
   );
-  assert.match(prompt, /has protected labels/);
-  assert.match(prompt, /not\s+automerge-eligible/);
-  assert.match(prompt, /workflow\s+state signals, not proof or patch quality defects/);
+  assert.match(
+    readFileSync("prompts/review-item.md", "utf8"),
+    /rate it with the `### Rating rubric` in `## Review Rules`/,
+  );
 });
 
 test("decision schema keeps draft and protected workflow state out of PR rank", () => {
@@ -1105,7 +1106,7 @@ test("decision schema keeps draft and protected workflow state out of PR rank", 
   const prRating = schema.properties.prRating;
 
   assert.match(prRating.description, /Calibrated PR quality rating/);
-  assert.match(prRating.description, /Rate the PR evidence and patch quality/);
+  assert.match(prRating.description, /Rate the PR evidence, patch quality, and product value/);
   assert.match(prRating.description, /Do not lower any tier solely because the PR is draft/);
   assert.match(prRating.description, /has protected labels/);
   assert.match(prRating.description, /not automerge-eligible/);
@@ -1192,7 +1193,7 @@ test("review prompt and generation schema constrain live proof to the retired co
   assert.match(prompt, /empty `entry`/);
   assert.match(prompt, /empty `steps` array/);
   assert.match(prompt, /Do not recommend or plan proof execution/);
-  assert.match(prompt, /fixed retired compatibility shape/);
+  assert.match(prompt, /Always fill `liveProofPlan` with the retired compatibility shape/);
   assert.match(prompt, /Do not derive commands, steps, or another demonstration plan/);
   assert.doesNotMatch(prompt, /Always fill `liveProofPlan` using the user-visible behavior/);
   assert.doesNotMatch(prompt, /This is a read-only demonstration plan/);
@@ -1228,6 +1229,25 @@ test("review prompt and generation schema constrain live proof to the retired co
   const liveProofIndex = requiredOrder.indexOf("liveProofPlan");
   assert.equal(requiredOrder[liveProofIndex - 1], "telegramVisibleProof");
   assert.equal(requiredOrder[liveProofIndex + 1], "mantisRecommendation");
+});
+
+test("review prompt states each always-fill field contract once", () => {
+  const prompt = readFileSync("prompts/review-item.md", "utf8");
+  for (const field of [
+    "liveProofPlan",
+    "telegramVisibleProof",
+    "mantisRecommendation",
+    "triagePriority",
+    "securityReview",
+    "realBehaviorProof",
+    "reviewMetrics",
+    "prRating",
+  ]) {
+    assert.equal(prompt.split(`Always fill \`${field}\``).length - 1, 1, field);
+  }
+  for (const label of ["merge-risk: 🚨 compatibility", "impact:data-loss"]) {
+    assert.equal(prompt.split(`\`${label}\`: `).length - 1, 1, label);
+  }
 });
 
 test("pull request comments render live verification with optional recording", () => {

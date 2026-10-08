@@ -28,6 +28,7 @@ import {
 } from "./clawsweeper-media-proof.js";
 import { safeOutputTail, trimMiddle } from "./clawsweeper-text.js";
 import { buildPullRequestReviewEvidence } from "./pr-review-evidence.js";
+import { PROVENANCE_NOT_RUN } from "./pr-review-provenance.js";
 import { verifyLikelyOwnerHistory } from "./clawsweeper-regression-provenance.js";
 import type {
   Decision,
@@ -70,6 +71,7 @@ import { readBoundedReviewResult } from "./review-output-policy.js";
 
 interface ReviewRuntimeDependencies {
   reviewItemPromptPath: string;
+  reviewRulesPath: string;
   decisionSchemaPath: string;
   prCloseCoverageProofPromptPath: string;
   targetRepo: () => string;
@@ -93,6 +95,7 @@ interface ReviewRuntimeDependencies {
 
 export function createReviewRuntime({
   reviewItemPromptPath: REVIEW_ITEM_PROMPT_PATH,
+  reviewRulesPath: REVIEW_RULES_PATH,
   decisionSchemaPath: CLAWSWEEPER_DECISION_SCHEMA_PATH,
   prCloseCoverageProofPromptPath: PR_CLOSE_COVERAGE_PROOF_PROMPT_PATH,
   targetRepo,
@@ -107,6 +110,7 @@ export function createReviewRuntime({
   stringOrUndefined,
 }: ReviewRuntimeDependencies) {
   let reviewPromptTemplateCache: string | undefined;
+  let reviewRulesCache: string | undefined;
   let reviewDecisionSchemaCache: string | undefined;
   let prCloseCoverageProofPromptTemplateCache: string | undefined;
 
@@ -456,6 +460,11 @@ export function createReviewRuntime({
     return reviewPromptTemplateCache;
   }
 
+  function reviewRulesText(): string {
+    reviewRulesCache ??= readFileSync(REVIEW_RULES_PATH, "utf8");
+    return reviewRulesCache;
+  }
+
   function prCloseCoverageProofPromptTemplate(): string {
     prCloseCoverageProofPromptTemplateCache ??= readFileSync(
       PR_CLOSE_COVERAGE_PROOF_PROMPT_PATH,
@@ -482,6 +491,9 @@ export function createReviewRuntime({
     runtimeHints: ReviewPromptRuntimeHints = {},
   ): ReviewPromptBuild {
     const prompt = reviewPromptTemplate();
+    // Review rules judge pull requests only; issue triage keeps the static template.
+    const rules =
+      item.kind === "pull_request" ? `\n\n## Review Rules\n\n${reviewRulesText().trim()}` : "";
     const contextJson = contextJsonForPrompt(context, item.kind);
     const prEvidence =
       item.kind === "pull_request"
@@ -495,6 +507,11 @@ export function createReviewRuntime({
       ? `\n\n## PR Introduction Evidence\n\n\`\`\`json\n${serializeReviewContext(prEvidence, [
           prEvidence.introduced,
         ])}\n\`\`\`\n`
+      : "";
+    const provenanceEvidence = prEvidence
+      ? `\n## Provenance Evidence\n\n\`\`\`json\n${serializeReviewContext(
+          runtimeHints.provenanceEvidence ?? PROVENANCE_NOT_RUN,
+        )}\n\`\`\`\n`
       : "";
     const schema = reviewDecisionSchemaText();
     const profile = repositoryProfileFor(item.repo);
@@ -521,7 +538,7 @@ ${additionalPrompt.trim()}
     const tokenDescription = runtimeHints.hasGitHubToken
       ? "A read-only GitHub App token for the target repository is available as `GH_TOKEN` (contents, issues, and pull requests read; expires within the hour); use it for `gh api`/authenticated GitHub reads so public rate limits do not apply; it cannot write. Never place it in a URL, log it, or send it to any non-GitHub host."
       : "No GitHub token is supplied to the review process; use public endpoints or pre-fetched context.";
-    const text = `${prompt}
+    const text = `${prompt}${rules}
 
 ## Repository State
 
@@ -545,7 +562,7 @@ ${additionalPrompt.trim()}
 - Linked screenshots and videos are downloaded before review into the media proof manifest; read those files rather than re-fetching.
 - ${runtimeHints.networkCapability === "unrestricted" ? "Treat the target checkout as read-only; OpenClaw gateway execution does not enforce the Codex filesystem sandbox." : "The target checkout is read-only."} Use ${proofScratchDir ? `\`${proofScratchDir}\`` : "the proof scratch directory"} for evidence and generated video stills/contact sheets.
 ${mediaProofPrompt}
-${introductionEvidence}
+${introductionEvidence}${provenanceEvidence}
 
 ## GitHub Context
 
@@ -560,8 +577,8 @@ ${extra}
       text,
       telemetry: {
         promptChars: text.length,
-        staticPromptChars: prompt.length,
-        contextChars: contextJson.length + introductionEvidence.length,
+        staticPromptChars: prompt.length + rules.length,
+        contextChars: contextJson.length + introductionEvidence.length + provenanceEvidence.length,
         schemaChars: schema.length,
         additionalPromptChars: additionalPrompt.trim().length,
       },
@@ -674,6 +691,7 @@ ${extra}
       confidence: "low",
       summary: `Codex review failed: ${reason}${status === null ? "" : ` (exit ${status})`}.`,
       changeSummary: "Review failed before ClawSweeper could summarize the requested change.",
+      changeExample: { scenario: "", before: "", after: "" },
       systemContext: "",
       architectureDiagram: "",
       evidence: [
@@ -748,6 +766,20 @@ ${extra}
         applied: false,
         status: "unreadable_or_unclear",
         summary: "AGENTS.md policy status was not assessed because the Codex review failed.",
+      },
+      productReview: {
+        kind: "not_applicable",
+        userProblem: "",
+        fixScope: "not_applicable",
+        worthIt: "not_applicable",
+        reason: "Product review was not assessed because the Codex review failed.",
+      },
+      provenance: [],
+      testingReview: {
+        proofPath: "not_applicable",
+        addedTestFiles: 0,
+        lowValueTests: [],
+        missingE2e: "",
       },
       reviewFindings: [],
       securityReview: {
@@ -1264,6 +1296,7 @@ ${extra}
     reviewPromptForTest,
     reviewPromptTelemetryForTest,
     reviewPromptTemplate,
+    reviewRulesText,
     runCodexForTest,
     CodexReviewError,
     buildReviewPrompt,

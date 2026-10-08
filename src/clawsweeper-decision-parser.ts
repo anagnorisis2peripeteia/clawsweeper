@@ -30,8 +30,18 @@ import {
   MERGE_RISK_OPTION_CATEGORIES,
   MERGE_RISK_OPTION_SCHEMA_KEYS,
   OVERALL_CORRECTNESS_VALUES,
+  LOW_VALUE_TEST_SCHEMA_KEYS,
+  MAX_LOW_VALUE_TESTS,
+  MAX_PROVENANCE_ENTRIES,
   PR_RATING_SCHEMA_KEYS,
   PR_RATING_TIERS,
+  PRODUCT_FIX_SCOPES,
+  PRODUCT_REVIEW_KINDS,
+  CHANGE_EXAMPLE_SCHEMA_KEYS,
+  PRODUCT_REVIEW_SCHEMA_KEYS,
+  PRODUCT_WORTH_IT_VALUES,
+  PROVENANCE_ENTRY_SCHEMA_KEYS,
+  PROVENANCE_VERDICTS,
   REAL_BEHAVIOR_PROOF_EVIDENCE_KINDS,
   REAL_BEHAVIOR_PROOF_SCHEMA_KEYS,
   REAL_BEHAVIOR_PROOF_STATUSES,
@@ -52,6 +62,8 @@ import {
   SECURITY_REVIEW_STATUSES,
   TELEGRAM_VISIBLE_PROOF_SCHEMA_KEYS,
   TELEGRAM_VISIBLE_PROOF_STATUSES,
+  TESTING_PROOF_PATHS,
+  TESTING_REVIEW_SCHEMA_KEYS,
   TRIAGE_PRIORITIES,
   VISION_FIT_STATUSES,
   WORK_CANDIDATES,
@@ -73,6 +85,9 @@ import type {
   MergeRiskOption,
   ParsedGitHubItemRef,
   PrRating,
+  ChangeExample,
+  ProductReview,
+  ProvenanceEntry,
   RealBehaviorProof,
   ReviewFinding,
   ReviewLabelName,
@@ -86,6 +101,7 @@ import type {
   SecurityConcern,
   SecurityReview,
   TelegramVisibleProof,
+  TestingReview,
 } from "./clawsweeper-types.js";
 import { derivedPrRating, normalizePrRating } from "./clawsweeper-rating.js";
 import { parseNextStep } from "./clawsweeper-next-step.js";
@@ -183,6 +199,11 @@ export function createDecisionParser({
 
   function requireReportTextArray(value: unknown, path: string): string[] {
     return requireStringArray(value, path).map(neutralizeOwnedSectionSpoofing);
+  }
+
+  // Report sections store these short fields on one line each.
+  function requireReportLine(value: unknown, path: string): string {
+    return requireReportText(value, path).replace(/\s+/g, " ").trim();
   }
 
   function requireSingleLineStringArray(value: unknown, path: string): string[] {
@@ -636,6 +657,67 @@ export function createDecisionParser({
     });
   }
 
+  function parseProductReview(value: unknown, path: string): ProductReview {
+    const record = requireRecord(value, path);
+    rejectUnexpectedKeys(record, PRODUCT_REVIEW_SCHEMA_KEYS, path);
+    return {
+      kind: requireEnum(record.kind, PRODUCT_REVIEW_KINDS, `${path}.kind`),
+      userProblem: requireReportLine(record.userProblem, `${path}.userProblem`),
+      fixScope: requireEnum(record.fixScope, PRODUCT_FIX_SCOPES, `${path}.fixScope`),
+      worthIt: requireEnum(record.worthIt, PRODUCT_WORTH_IT_VALUES, `${path}.worthIt`),
+      reason: requireReportLine(record.reason, `${path}.reason`),
+    };
+  }
+
+  function parseChangeExample(value: unknown, path: string): ChangeExample {
+    const record = requireRecord(value, path);
+    rejectUnexpectedKeys(record, CHANGE_EXAMPLE_SCHEMA_KEYS, path);
+    return {
+      scenario: requireReportLine(record.scenario, `${path}.scenario`),
+      before: requireReportLine(record.before, `${path}.before`),
+      after: requireReportLine(record.after, `${path}.after`),
+    };
+  }
+
+  function parseProvenance(value: unknown, path: string): ProvenanceEntry[] {
+    if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+    return value.slice(0, MAX_PROVENANCE_ENTRIES).map((entry, index) => {
+      const entryPath = `${path}[${index}]`;
+      const record = requireRecord(entry, entryPath);
+      rejectUnexpectedKeys(record, PROVENANCE_ENTRY_SCHEMA_KEYS, entryPath);
+      return {
+        area: requireReportLine(record.area, `${entryPath}.area`),
+        introducedBy: requireReportLine(record.introducedBy, `${entryPath}.introducedBy`),
+        originalReason: requireReportLine(record.originalReason, `${entryPath}.originalReason`),
+        verdict: requireEnum(record.verdict, PROVENANCE_VERDICTS, `${entryPath}.verdict`),
+      };
+    });
+  }
+
+  function parseTestingReview(value: unknown, path: string): TestingReview {
+    const record = requireRecord(value, path);
+    rejectUnexpectedKeys(record, TESTING_REVIEW_SCHEMA_KEYS, path);
+    const addedTestFiles = requireInteger(record.addedTestFiles, `${path}.addedTestFiles`);
+    if (addedTestFiles < 0) throw new Error(`${path}.addedTestFiles must not be negative`);
+    if (!Array.isArray(record.lowValueTests)) {
+      throw new Error(`${path}.lowValueTests must be an array`);
+    }
+    return {
+      proofPath: requireEnum(record.proofPath, TESTING_PROOF_PATHS, `${path}.proofPath`),
+      addedTestFiles,
+      lowValueTests: record.lowValueTests.slice(0, MAX_LOW_VALUE_TESTS).map((entry, index) => {
+        const entryPath = `${path}.lowValueTests[${index}]`;
+        const test = requireRecord(entry, entryPath);
+        rejectUnexpectedKeys(test, LOW_VALUE_TEST_SCHEMA_KEYS, entryPath);
+        return {
+          file: requireReportLine(test.file, `${entryPath}.file`),
+          reason: requireReportLine(test.reason, `${entryPath}.reason`),
+        };
+      }),
+      missingE2e: requireReportLine(record.missingE2e, `${path}.missingE2e`),
+    };
+  }
+
   function parseTelegramVisibleProof(value: unknown, path: string): TelegramVisibleProof {
     const record = requireRecord(value, path);
     rejectUnexpectedKeys(record, TELEGRAM_VISIBLE_PROOF_SCHEMA_KEYS, path);
@@ -1039,6 +1121,9 @@ export function createDecisionParser({
       record.maintainerDecision,
       "decision.maintainerDecision",
     );
+    const productReview = parseProductReview(record.productReview, "decision.productReview");
+    const provenance = parseProvenance(record.provenance, "decision.provenance");
+    const testingReview = parseTestingReview(record.testingReview, "decision.testingReview");
     const nextStep =
       record.nextStep === undefined
         ? undefined
@@ -1049,6 +1134,7 @@ export function createDecisionParser({
       confidence: requireEnum(record.confidence, CONFIDENCES, "decision.confidence"),
       summary: requireReportText(record.summary, "decision.summary"),
       changeSummary: requireReportText(record.changeSummary, "decision.changeSummary"),
+      changeExample: parseChangeExample(record.changeExample, "decision.changeExample"),
       systemContext: requireReportText(record.systemContext, "decision.systemContext"),
       architectureDiagram: sanitizeArchitectureDiagram(
         requireString(record.architectureDiagram, "decision.architectureDiagram"),
@@ -1138,6 +1224,9 @@ export function createDecisionParser({
         record.agentsPolicyStatus,
         "decision.agentsPolicyStatus",
       ),
+      productReview,
+      provenance,
+      testingReview,
       reviewFindings,
       securityReview: parseSecurityReview(record.securityReview, "decision.securityReview"),
       realBehaviorProof: parseRealBehaviorProof(

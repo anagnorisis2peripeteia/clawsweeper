@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { isDocsPath } from "./clawsweeper-change-detection.js";
 import { AUTHOR_PR_BUDGET_MIN_INACTIVE_DAYS, REVIEW_SECTIONS } from "./clawsweeper-policy.js";
 import { createPullRequestReferenceParser } from "./clawsweeper-pr-references.js";
+import {
+  reportChangeExample,
+  reportProductReview,
+  reportProvenance,
+  reportTestingReview,
+} from "./clawsweeper-report-parser.js";
 import type {
   AuthorPrBudgetApplyState,
   CloseReason,
@@ -103,6 +109,7 @@ export function createPullRequestPromotionFacts(
       confidence: "high",
       summary: reviewSectionValue(markdown, "summary"),
       changeSummary: reviewSectionValue(markdown, "changeSummary"),
+      changeExample: reportChangeExample(markdown),
       systemContext: reviewSectionValue(markdown, "systemContext"),
       architectureDiagram: reviewSectionValue(markdown, "architectureDiagram"),
       evidence: reportEvidence(markdown),
@@ -137,6 +144,9 @@ export function createPullRequestPromotionFacts(
       ...visionFit,
       rootCauseCluster: reportRootCauseCluster(markdown),
       agentsPolicyStatus: reportAgentsPolicyStatus(markdown) ?? defaultAgentsPolicyStatus(),
+      productReview: reportProductReview(markdown),
+      provenance: reportProvenance(markdown),
+      testingReview: reportTestingReview(markdown),
       reviewFindings: reportReviewFindings(markdown),
       securityReview: reportSecurityReview(markdown),
       realBehaviorProof: reportRealBehaviorProof(markdown),

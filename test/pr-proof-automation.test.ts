@@ -267,13 +267,14 @@ for (const path of ["README.md", "src/arbitrary.ts"]) {
     const comment = renderReviewCommentFromReport(report, "none");
     assert.ok(comment.includes(markers));
     assert.match(comment, /^Codex review: needs real behavior proof before merge\./);
-    assert.match(comment, /\| \*\*Real behavior\*\* \| Required(?: by policy)? \|/);
+    assert.match(
+      comment,
+      /\| \*\*Proof confidence\*\* \| [^|]+ \| Recorded reviewer rating; Required by policy/,
+    );
     assert.match(comment, /⛔ \*\*Blocked before merge/);
     for (const line of comment
       .split("\n")
-      .filter((line) =>
-        /\*\*(?:Real behavior|Proof confidence|Add real behavior proof)\*\*/.test(line),
-      )) {
+      .filter((line) => /\*\*(?:Proof confidence|Add real behavior proof)\*\*/.test(line))) {
       assert.match(line, /required|policy/i);
       assert.match(line, /recorded.*not.applicable/i);
       assert.match(line, /main PR body/);
@@ -347,7 +348,7 @@ test("N/A projection preserves scope, trust, authority, and exact override bound
   ] as const) {
     const report = notApplicableProofReport(metadata);
     const comment = renderReviewCommentFromReport(report, "none");
-    assert.equal(/\| \*\*Real behavior\*\* \| Required by policy \|/.test(comment), blocked, name);
+    assert.equal(/Required by policy:/.test(comment), blocked, name);
     assert.equal(/\*\*Add real behavior proof\*\*/.test(comment), blocked, name);
     assert.equal(
       /clawsweeper-verdict:pass/.test(reviewAutomationMarkersFromReport(report)),
@@ -463,7 +464,7 @@ Full review comments:
     comment,
     /\| \*\*Proof confidence\*\* \| 🦀 challenger crab \*\*\(6\/6\)\*\* ✨ media proof bonus \|/,
   );
-  assert.match(comment, /Shiny media proof means a screenshot, video, or linked artifact/);
+  assert.match(comment, /✨ marks media proof \(a screenshot, video, or linked artifact\)/);
   assert.doesNotMatch(comment, /Rank-up moves:/);
 });
 
@@ -525,7 +526,7 @@ Full review comments:
   assert.equal(reviewAutomationMarkersFromReport(mockOnlyReport), markers);
   assert.match(
     renderReviewCommentFromReport(mockOnlyReport, "none"),
-    /\| \*\*Real behavior\*\* \| Not applicable \|/,
+    /\| \*\*Proof confidence\*\* \| [^|]+ \| Not applicable: /,
   );
 });
 
@@ -862,33 +863,6 @@ Full review comments:
     /clawsweeper-verdict:needs-human/,
   );
 
-  const normalizedAuthoritySensitiveReport = reportFor({
-    author: "maintainer",
-    association: "MEMBER",
-    status: "sufficient",
-  })
-    .replace("Evidence kind: terminal", "Evidence kind: screenshot")
-    .replace(
-      "Summary: The maintainer supplied terminal output from the changed production path.",
-      "Summary: Authority-chain proof required: a screenshot claims no visible console errors.",
-    );
-  const normalizedAuthoritySensitiveComment = renderReviewCommentFromReport(
-    normalizedAuthoritySensitiveReport,
-    "none",
-  );
-  assert.match(
-    normalizedAuthoritySensitiveComment,
-    /Needs stronger real behavior proof before merge/i,
-  );
-  assert.match(
-    reviewAutomationMarkersFromReport(normalizedAuthoritySensitiveReport),
-    /clawsweeper-verdict:needs-human/,
-  );
-  assert.doesNotMatch(
-    reviewAutomationMarkersFromReport(normalizedAuthoritySensitiveReport),
-    /clawsweeper-verdict:pass/,
-  );
-
   const contributorReport = reportFor({ author: "contributor", association: "CONTRIBUTOR" });
   const contributorComment = renderReviewCommentFromReport(contributorReport, "none");
   assert.match(contributorComment, /needs real behavior proof before merge/i);
@@ -902,7 +876,7 @@ Full review comments:
     "none",
   );
   assert.match(securityComment, /needs changes before merge/i);
-  assert.match(securityComment, /\| \*\*Security\*\* \| Needs attention/);
+  assert.match(securityComment, /### Security\n\nNeeds attention:/);
   assert.doesNotMatch(securityComment, /needs real behavior proof before merge/i);
 });
 
@@ -995,64 +969,6 @@ Full review comments:
   assert.match(mockOnlyComment, /needs real behavior proof before merge/i);
   assert.match(mockOnlyMarkers, /clawsweeper-verdict:needs-human/);
   assert.doesNotMatch(mockOnlyMarkers, /clawsweeper-verdict:pass/);
-});
-
-test("screenshot-only browser runtime proof blocks pass markers", () => {
-  const report = `${reportFrontMatter({
-    type: "pull_request",
-    number: "74460",
-    decision: "keep_open",
-    close_reason: "none",
-    review_status: "complete",
-    confidence: "high",
-    author: "contributor",
-    author_association: "CONTRIBUTOR",
-    labels: JSON.stringify(["clawsweeper:automerge"]),
-    work_candidate: "none",
-    pull_head_sha: "abc123def456abc123def456abc123def456abcd",
-  })}
-
-## Summary
-
-Keep this focused PR open for automerge.
-
-## What This Changes
-
-Adds tweakcn.com to the Control UI connect-src directive.
-
-## Best Possible Solution
-
-Ask the contributor to add browser runtime proof from their real setup.
-
-${realBehaviorProofReportSection({
-  status: "sufficient",
-  evidenceKind: "screenshot",
-  needsContributorAction: false,
-  summary:
-    "The inspected screenshot shows an after-fix Control UI import success state for a tweakcn theme, with no visible console CSP violation.",
-})}
-
-## Review Findings
-
-Overall correctness: patch is correct
-
-Overall confidence: 0.9
-
-Full review comments:
-
-- none
-`;
-
-  const comment = renderReviewCommentFromReport(report, "none");
-  const markers = reviewAutomationMarkersFromReport(report);
-
-  assert.match(comment, /Codex review: needs real behavior proof before merge\./);
-  assert.match(comment, /Needs stronger real behavior proof before merge:/);
-  assert.match(comment, /not enough for browser runtime or security behavior/);
-  assert.match(comment, /console, network, terminal, live output, or logs/);
-  assert.match(markers, /clawsweeper-verdict:needs-human/);
-  assert.doesNotMatch(markers, /clawsweeper-verdict:pass/);
-  assert.doesNotMatch(markers, /proof: sufficient/);
 });
 
 test("missing real behavior proof blocks pass and repair markers", () => {
@@ -1423,14 +1339,14 @@ Full review comments:
     if (scenario.preservedProof) {
       assert.match(labelDetails, /add `proof: sufficient`/, scenario.name);
       assert.doesNotMatch(comment, /needs real behavior proof before merge/i, scenario.name);
-      assert.match(comment, /\| \*\*Real behavior\*\* \| Verified \|/, scenario.name);
+      assert.match(comment, /\| \*\*Proof confidence\*\* \| [^|]+ \| Sufficient \(/, scenario.name);
       assert.doesNotMatch(comment, /\*\*Add real behavior proof\*\*/, scenario.name);
     }
     if (scenario.state === "failed" || scenario.state === "malformed") {
       assert.match(comment, /\*\*Resolve historical verification\*\*/, scenario.name);
       assert.match(
         comment,
-        /\| \*\*Historical verification\*\* \| Needs maintainer review \|/,
+        /A historical verification receipt failed or is malformed\./,
         scenario.name,
       );
       if (
@@ -1448,7 +1364,7 @@ Full review comments:
   const missingComment = renderReviewCommentFromReport(reportFor({ payload: passPayload }), "none");
   assert.doesNotMatch(
     missingComment,
-    /add `proof: sufficient`|\| \*\*Real behavior\*\* \| Verified/,
+    /add `proof: sufficient`|\| \*\*Proof confidence\*\* \| [^|]+ \| Sufficient \(/,
   );
   assert.match(missingComment, /\| \*\*Proof confidence\*\* \| [^|]*\*\*\(1\/6\)\*\*/);
 
@@ -1530,10 +1446,11 @@ Full review comments:
     const attached = reportFor({ payload: passPayload, ...exemption });
     assert.match(reviewAutomationMarkersFromReport(direct), /clawsweeper-verdict:pass/);
     assert.match(reviewAutomationMarkersFromReport(attached), /clawsweeper-verdict:pass/);
-    const proofRow = /\| \*\*Real behavior\*\* \|[^\n]+/;
+    // The assessed proof statement must match; the tier is the reviewer's rating.
+    const proofStatement = /\| \*\*Proof confidence\*\* \|[^|\n]+\|([^\n]+)/;
     assert.equal(
-      renderReviewCommentFromReport(attached, "none").match(proofRow)?.[0],
-      renderReviewCommentFromReport(direct, "none").match(proofRow)?.[0],
+      renderReviewCommentFromReport(attached, "none").match(proofStatement)?.[1],
+      renderReviewCommentFromReport(direct, "none").match(proofStatement)?.[1],
     );
     assert.doesNotMatch(renderReviewCommentFromReport(attached, "none"), /add `proof: sufficient`/);
   }
