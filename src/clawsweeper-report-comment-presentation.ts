@@ -109,8 +109,6 @@ export function createReportCommentPresentation(
     pullHeadShaFromReport,
     pullRequestReviewReadinessFromReport,
     renderCloseCommentFromReport,
-    renderDataModelWarningFromReport,
-    renderSqliteSchemaWarningFromReport,
     renderOpenClawPrSurfaceFromReport,
     renderReviewMetricsDigest,
     repairLoopPassModeFromReport,
@@ -358,8 +356,6 @@ export function createReportCommentPresentation(
     const revision = reviewHistory.totalCompletedCycles + 1;
     const lines = [verdictLine, ""];
     const prSurface = renderOpenClawPrSurfaceFromReport(markdown);
-    const dataModelWarning = renderDataModelWarningFromReport(markdown);
-    const sqliteSchemaWarning = renderSqliteSchemaWarningFromReport(markdown);
     const rootCauseClusterBlock = publicRootCauseClusterBlock(rootCauseCluster);
     // The decision rationale is model text rendered above owned sections; escape
     // heading-shaped lines so it cannot spoof them.
@@ -472,7 +468,6 @@ export function createReportCommentPresentation(
         !reviewFailed && (prRating.patchTier === "F" || prRating.patchTier === "D");
       const beforeMergeItems = reviewReadiness.items;
       appendHeadingSection(lines, "What this changes", changeSummaryLine);
-      if (sqliteSchemaWarning) lines.push(sqliteSchemaWarning, "");
       if (!reviewFailed) {
         // The proof summary renders here, or only in Before merge when proof blocks merge.
         appendHeadingSection(
@@ -558,7 +553,6 @@ export function createReportCommentPresentation(
       if (reviewMetrics.length) {
         appendDetails("Review metrics", renderReviewMetricsDigest(reviewMetrics));
       }
-      if (dataModelWarning) appendDetails("Stored data model", dataModelWarning);
       if (rootCauseClusterBlock) appendDetails("Root-cause cluster", rootCauseClusterBlock);
       if (labelDetails.length) appendDetails("Labels", ...labelDetails);
       const rankUpMoves = prRating.nextSteps
