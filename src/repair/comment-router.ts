@@ -29,7 +29,6 @@ import {
   AUTOCLOSE_INTENTS,
   MERGE_INTENTS,
   REPAIR_INTENTS,
-  autocloseReasonFromCommand,
   autoRepairBlockReason,
   autoRepairHeadKey,
   automergeFailedChecksRepairReason,
@@ -53,25 +52,17 @@ import {
   existingCommandStatusBlocksReplay,
   existingModeStatusBlocksReplay,
   existingRepairLoopModeOutcome,
-  freshExactHeadReviewStartLease,
-  isAuthorReadOnlyCommandAllowed,
-  isMaintainerCommandAllowed,
-  isIssueImplementationCommandAllowed,
   isAutomergeMergeStateReady,
   issueImplementationClusterId,
   issueImplementationJobPath,
   issueImplementationLinkedPrSignal,
   issueImplementationOverrideBlockerClass,
   pendingRepairLoopOptIns,
-  isTrustedStatusCommentAuthor,
-  latestTrustedExactHeadReview,
   maintainerModeCommandCanResumePausedMode,
   maintainerApprovalAppliesToExactHeadReview,
   maintainerAutomergeOptInApprovesNeedsHuman as maintainerAutomergeOptInApprovesNeedsHumanReason,
   latestRepairLoopResumeTime,
-  parseRoutedCommentCommand,
   pausedModeStatusBlocksReplay,
-  parseTrustedAutomation,
   repositoryRepairCommandBlockReason,
   repairableCheckBlockers,
   reviewOnlyRepairLoopCompletionLabels,
@@ -90,11 +81,23 @@ import {
   staleClosedItemCommandReason,
   shouldClearMaintainerCommandReaction,
   syncAutomergeJobRepairMode,
-  trustedAutomationPredatesReviewStartLease,
-  trustedExactHeadReviewCompletionSince,
   trustedCloseBlockReason,
   usesSharedAutomergeStatus,
 } from "./comment-router-core.js";
+import {
+  autocloseReasonFromCommand,
+  freshExactHeadReviewStartLease,
+  isAllowedMutationActor,
+  isAuthorReadOnlyCommandAllowed,
+  isGitHubAppIntegrationAuthError,
+  isMaintainerCommandAllowed,
+  isTrustedStatusCommentAuthor,
+  latestTrustedExactHeadReview,
+  parseRoutedCommentCommand,
+  parseTrustedAutomation,
+  trustedAutomationPredatesReviewStartLease,
+  trustedExactHeadReviewCompletionSince,
+} from "./comment-router/admission.js";
 import { planCommandAckConvergence } from "./command-ack-convergence.js";
 import {
   hasAutomergeCommandStatusMarker,
@@ -122,8 +125,6 @@ import {
   exactCommentVersionMatchesLive,
   hasSuccessfulDispatchExecutionJob,
   issueNumberFromUrl,
-  isAllowedMutationActor,
-  isGitHubAppIntegrationAuthError,
   routerDispatchReceiptKey,
   routedCommentSourceDeliveryId,
   selectCommentsForRouting,
@@ -4885,10 +4886,7 @@ function resolveMaintainerCommandAuthorization(command: LooseRecord) {
     allowedAssociations,
     allowedRepositoryPermissions: [...allowedRepositoryPermissions],
   };
-  const allowed =
-    command.intent === "implement_issue"
-      ? isIssueImplementationCommandAllowed(authorizationInput)
-      : isMaintainerCommandAllowed(authorizationInput);
+  const allowed = isMaintainerCommandAllowed(authorizationInput);
   if (allowed) return { allowed: true, repositoryPermission };
   const association = command.author_association || "unknown";
   const permission = repositoryPermission || "unknown";
