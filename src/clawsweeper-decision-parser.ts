@@ -416,9 +416,16 @@ export function createDecisionParser({
     };
   }
 
-  function parseLikelyOwner(value: unknown, path: string): LikelyOwner {
+  // The runner verifies owners and marks them with attributionSource. Only a stored
+  // decision can have it; model output cannot.
+  function parseLikelyOwner(value: unknown, path: string, source: "model" | "stored"): LikelyOwner {
     const record = requireRecord(value, path);
-    rejectUnexpectedKeys(record, LIKELY_OWNER_SCHEMA_KEYS, path);
+    const { attributionSource, ...modelFields } = record;
+    rejectUnexpectedKeys(
+      source === "stored" ? modelFields : record,
+      LIKELY_OWNER_SCHEMA_KEYS,
+      path,
+    );
     let history: LikelyOwner["history"];
     if (record.history !== undefined && record.history !== null) {
       const source = requireRecord(record.history, `${path}.history`);
@@ -446,6 +453,15 @@ export function createDecisionParser({
       commits: requireSingleLineStringArray(record.commits, `${path}.commits`),
       files: requireSingleLineStringArray(record.files, `${path}.files`),
       confidence: requireEnum(record.confidence, CONFIDENCES, `${path}.confidence`),
+      ...(attributionSource === undefined
+        ? {}
+        : {
+            attributionSource: requireEnum(
+              attributionSource,
+              new Set(["raw_parent_line_v1"] as const),
+              `${path}.attributionSource`,
+            ),
+          }),
     };
   }
 
@@ -975,9 +991,32 @@ export function createDecisionParser({
     throw new Error(`${path} has invalid value`);
   }
 
-  function parseDecision(value: unknown, item?: RootCauseNormalizationItem): Decision {
+  // Model output must fill every schema field, name an owner and keep its fields
+  // consistent (merge-risk options, maintainer owner, label justifications). An invalid
+  // root-cause cluster becomes the empty cluster. A stored review record also holds
+  // decisions that the host built or changed (failed and oversized reviews, apply
+  // promotions). Those skip the model rules, but any invalid field fails.
+  function parseDecisionFields(
+    value: unknown,
+    item: RootCauseNormalizationItem | undefined,
+    source: "model" | "stored",
+  ): Decision {
     const record = requireRecord(value, "decision");
     rejectUnexpectedKeys(record, DECISION_SCHEMA_KEYS, "decision");
+    const optional = <
+      K extends
+        | "fixedRelease"
+        | "fixedSha"
+        | "fixedAt"
+        | "regressionAssessment"
+        | "regressionProvenance",
+    >(
+      key: K,
+      parse: (value: unknown, path: string) => Decision[K],
+    ) =>
+      (source === "stored" && record[key] === undefined
+        ? {}
+        : { [key]: parse(record[key], `decision.${key}`) }) as Pick<Decision, K>;
     const evidence = Array.isArray(record.evidence)
       ? record.evidence.map((entry, index) => parseEvidence(entry, `decision.evidence[${index}]`))
       : (() => {
@@ -985,12 +1024,14 @@ export function createDecisionParser({
         })();
     const likelyOwners = Array.isArray(record.likelyOwners)
       ? record.likelyOwners.map((entry, index) =>
-          parseLikelyOwner(entry, `decision.likelyOwners[${index}]`),
+          parseLikelyOwner(entry, `decision.likelyOwners[${index}]`, source),
         )
       : (() => {
           throw new Error("decision.likelyOwners must be an array");
         })();
-    if (likelyOwners.length === 0) throw new Error("decision.likelyOwners must not be empty");
+    if (source === "model" && likelyOwners.length === 0) {
+      throw new Error("decision.likelyOwners must not be empty");
+    }
     const reviewFindings = Array.isArray(record.reviewFindings)
       ? record.reviewFindings.map((entry, index) =>
           parseReviewFinding(entry, `decision.reviewFindings[${index}]`),
@@ -1094,11 +1135,14 @@ export function createDecisionParser({
         AUTO_IMPLEMENTATION_CANDIDATES,
         "decision.autoImplementationCandidate",
       ),
-      rootCauseCluster: parseRootCauseClusterOrDefault(
-        record.rootCauseCluster,
-        "decision.rootCauseCluster",
-        item,
-      ),
+      rootCauseCluster:
+        source === "model"
+          ? parseRootCauseClusterOrDefault(
+              record.rootCauseCluster,
+              "decision.rootCauseCluster",
+              item,
+            )
+          : parseRootCauseCluster(record.rootCauseCluster, "decision.rootCauseCluster", item),
       agentsPolicyStatus: parseAgentsPolicyStatus(
         record.agentsPolicyStatus,
         "decision.agentsPolicyStatus",
@@ -1127,17 +1171,11 @@ export function createDecisionParser({
         record.overallConfidenceScore,
         "decision.overallConfidenceScore",
       ),
-      fixedRelease: requireNullableSingleLineString(record.fixedRelease, "decision.fixedRelease"),
-      fixedSha: requireNullableSingleLineString(record.fixedSha, "decision.fixedSha"),
-      fixedAt: requireNullableSingleLineString(record.fixedAt, "decision.fixedAt"),
-      regressionAssessment: parseRegressionAssessment(
-        record.regressionAssessment,
-        "decision.regressionAssessment",
-      ),
-      regressionProvenance: parseRegressionProvenanceCandidate(
-        record.regressionProvenance,
-        "decision.regressionProvenance",
-      ),
+      ...optional("fixedRelease", requireNullableSingleLineString),
+      ...optional("fixedSha", requireNullableSingleLineString),
+      ...optional("fixedAt", requireNullableSingleLineString),
+      ...optional("regressionAssessment", parseRegressionAssessment),
+      ...optional("regressionProvenance", parseRegressionProvenanceCandidate),
       closeComment: requireReportText(record.closeComment, "decision.closeComment"),
       workCandidate: requireEnum(record.workCandidate, WORK_CANDIDATES, "decision.workCandidate"),
       workConfidence: requireEnum(record.workConfidence, CONFIDENCES, "decision.workConfidence"),
@@ -1165,15 +1203,27 @@ export function createDecisionParser({
         "decision.workLikelyFiles",
       ),
     };
-    validateMergeRiskOptions(decision);
-    validateMaintainerDecisionOwner(decision);
-    validateLabelJustifications(decision);
+    if (source === "model") {
+      validateMergeRiskOptions(decision);
+      validateMaintainerDecisionOwner(decision);
+      validateLabelJustifications(decision);
+    }
     return decision;
+  }
+
+  function parseDecision(value: unknown, item?: RootCauseNormalizationItem): Decision {
+    return parseDecisionFields(value, item, "model");
+  }
+
+  /** Parses the schema fields of a decision from a stored review record. */
+  function parseStoredDecisionFields(value: unknown, item: RootCauseNormalizationItem): Decision {
+    return parseDecisionFields(value, item, "stored");
   }
 
   return {
     defaultRootCauseCluster,
     parseDecision,
+    parseStoredDecisionFields,
     parseGitHubItemRef,
     parseLabelJustification,
     parseLiveProofPlan,
