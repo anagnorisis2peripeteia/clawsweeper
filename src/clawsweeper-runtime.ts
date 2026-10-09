@@ -48,7 +48,6 @@ import {
   applyBlockingProtectedLabels,
   applyKindArg,
   applyProtectedLabelReason,
-  asRecord,
   authorPrBudgetAgeSkipReason,
   closeReasonApplyAgeSkipReason,
   closeReasonEnabled,
@@ -62,7 +61,6 @@ import {
   isProtectedItem,
   isVerifiedFixedCloseReason,
   labelNames,
-  login,
   normalizeAuthorAssociation,
   normalizeLabelName,
   obsoleteFixPrAgeSkipReason,
@@ -124,6 +122,7 @@ import type {
   RootCauseNormalizationItem,
   SecurityConcern,
 } from "./clawsweeper-types.js";
+import { asRecord } from "./value-coerce.js";
 export {
   authorPrBudgetAgeSkipReason,
   closeReasonApplyAgeSkipReason,
@@ -379,11 +378,9 @@ export const {
 const { fetchReviewedPrActivityCursor, ghPaged, githubCount } = githubContext;
 
 const sourceRevisionTools = createSourceRevisionTools({
-  asRecord,
   clawsweeperBotAuthors: CLAWSWEEPER_BOT_AUTHORS,
   githubCount,
   isClawSweeperComment: (value) => isClawSweeperComment(value),
-  login,
   normalizeAuthorAssociation,
   normalizeLabelName,
   pullHeadShaFromContext: (context) => pullHeadShaFromContext(context),
@@ -511,7 +508,6 @@ const reportRealBehaviorProofPolicy = createRealBehaviorProofPolicy({
 });
 
 const labelPolicy = createLabelPolicy({
-  asRecord,
   frontMatterValue,
   isAutomationReportAuthor,
   mergeRiskOptionsFromReport,
@@ -527,7 +523,6 @@ export const { featureShowcaseLabelsForTest, prStatusLabelsForTest, prStatusLabe
 const { hasRepairLoopPauseLabel, prStatusLabelKindFromReport } = labelPolicy;
 
 const applyGuards = createApplyGuards({
-  asRecord,
   authorPrBudget: () => authorPrBudget(),
   authorPrBudgetAgeSkipReason,
   authorPrBudgetCloseEnabled,
@@ -540,7 +535,6 @@ const applyGuards = createApplyGuards({
   isMaintainerAuthored,
   isOlderThanDays,
   labelNames,
-  login,
   normalizeLabelName,
   obsoleteFixPrAgeSkipReason,
   obsoleteFixPrCloseEnabled,
@@ -572,7 +566,6 @@ export function stalledUnprovenProofRequestBlockReason(
 const { prAutoCloseExemptDecisionReason, prAutoCloseExemptLabel } = applyGuards;
 
 const contextHydration = createContextHydration({
-  asRecord,
   CLAWSWEEPER_BOT_AUTHORS,
   ...repositoryPaths,
   displayTitle: (title) => displayTitle(title),
@@ -587,7 +580,6 @@ const contextHydration = createContextHydration({
   isBulkFilerExemptAuthorAssociation,
   isSafeGitBranchName: (branch) => isSafeGitBranchName(branch),
   labelNames,
-  login,
   markdownFiles,
   normalizeAuthorAssociation,
   normalizeLabelName,
@@ -643,7 +635,6 @@ const reviewPlanning = createReviewPlanning({
   ghJsonLines,
   ...githubContext,
   itemSourceRevisionSha256,
-  asRecord,
   normalizeAuthorAssociation,
   shouldPlanItem,
   ...recordMetadata,
@@ -729,7 +720,6 @@ function fetchReviewStructuralRecord(options: {
 }
 
 const { collectItemContext } = createItemContext({
-  asRecord,
   ...contextHydration,
   ...githubContext,
   ghJson,
@@ -748,7 +738,6 @@ const reviewRuntime = createReviewRuntime({
   run,
   untrustedCodexEnv,
   ghJson,
-  asRecord,
   defaultRootCauseCluster,
   parseDecision,
   ensureDir,
@@ -775,7 +764,6 @@ const { codexFailureReason, isSafeGitBranchName, prCloseCoverageProofPromptTempl
 
 const assistWorkflow = createAssistWorkflow({
   root: ROOT,
-  asRecord,
   canPatchReviewComment: (comment) => canPatchReviewComment(comment),
   collectItemContext,
   ensureDir,
@@ -809,7 +797,6 @@ const statusContext = createStatusContext({
   markdownRepository,
   ghJson,
   GitHubRuntimeBudgetError,
-  asRecord,
   frontMatterValue,
   stringOrUndefined,
   numberOrUndefined,
@@ -908,7 +895,6 @@ const { sentence } = reviewPresentation;
 const reportOrchestration = createReportOrchestration({
   reportRealBehaviorProofPolicy,
   agentsPolicyStatusLine: (...args) => agentsPolicyStatusLine(...args),
-  asRecord,
   ...reviewPresentation,
   collectItemContext,
   ...contextHydration,
@@ -1082,7 +1068,6 @@ const reviewCommentWorkflow = createReviewCommentWorkflow({
   githubCount,
   ghPaged,
   reviewCommentBodyDigest,
-  asRecord,
   parseGitHubItemRef,
   ...reportParser,
   ensureDir,
@@ -1229,7 +1214,6 @@ const { reviewCommand } = createReviewCommandWorkflow({
   set activeReviewMutationRunner(value: MutationRunner | null) {
     githubExecution.activeReviewMutationRunner = value;
   },
-  asRecord,
   attachFixedPullRequest,
   verifyRegressionProvenance,
   ...contextHydration,
@@ -1278,7 +1262,6 @@ const { applyDecisionsCommandInner } = createApplyDecisionWorkflow({
   applyProtectedLabelReason,
   ...recordMetadata,
   ...commandOperations,
-  asRecord,
   authorPrBudgetAgeSkipReason,
   ...contextHydration,
   CLAWSWEEPER_BOT_AUTHORS,
@@ -1301,7 +1284,6 @@ const { applyDecisionsCommandInner } = createApplyDecisionWorkflow({
   isMaintainerAuthorAssociation,
   implementedOnMainPullRequestProvenanceApplyBlock,
   isVerifiedFixedCloseReason,
-  login,
   mutationErrorMessage,
   normalizeAuthorAssociation,
   normalizeLabelName,
