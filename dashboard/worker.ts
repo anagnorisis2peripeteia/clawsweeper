@@ -6903,15 +6903,12 @@ async function githubTargetDispatch(request: Request, env) {
 }
 
 async function hostedTargetQueueRequest(env, path: string, body: string) {
+  // The queue trims the repository. Trim it here too, so that a padded slug gets
+  // the same eligibility check before the header tells the queue it passed.
   const targetRepo = String(
     objectValue(objectValue(parseJsonObject(body)).decision).targetRepo || "",
-  );
-  if (targetRepo) {
-    // The value goes into a header below. A value that is not a repo slug can be an
-    // invalid header value, and then `Headers` throws.
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) {
-      return json({ error: "invalid_target_repo" }, 400);
-    }
+  ).trim();
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(targetRepo)) {
     const eligibility = await workerHostedTargetEligibility(env, targetRepo);
     if (eligibility.outcome === "terminal") {
       return hostedTargetProbeResponse({ outcome: "terminal" });
@@ -6923,10 +6920,14 @@ async function hostedTargetQueueRequest(env, path: string, body: string) {
       });
     }
   }
-  const headers = new Headers({
-    "content-type": "application/json",
-    [HOSTED_TARGET_ELIGIBILITY_HEADER]: targetRepo,
-  });
+  const headers = new Headers({ "content-type": "application/json" });
+  try {
+    headers.set(HOSTED_TARGET_ELIGIBILITY_HEADER, targetRepo);
+  } catch {
+    // Headers rejects a value with CR, LF or NUL inside it, or with a character
+    // above U+00FF. Such a value is not a repository slug. Send the request
+    // without this header, and the queue rejects the decision with its own error.
+  }
   if (path === "/enqueue") {
     headers.set(
       EXACT_REVIEW_AUTHENTICATED_BODY_FINGERPRINT_HEADER,
