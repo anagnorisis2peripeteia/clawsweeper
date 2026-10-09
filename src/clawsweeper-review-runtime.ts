@@ -28,6 +28,7 @@ import {
 } from "./clawsweeper-media-proof.js";
 import { safeOutputTail, trimMiddle } from "./clawsweeper-text.js";
 import { buildPullRequestReviewEvidence } from "./pr-review-evidence.js";
+import { reviewHistoryCapability } from "./pr-review-history.js";
 import { PROVENANCE_NOT_RUN } from "./pr-review-provenance.js";
 import { reviewPromptContext } from "./clawsweeper-prompt-context.js";
 import { verifyLikelyOwnerHistory } from "./clawsweeper-regression-provenance.js";
@@ -567,7 +568,7 @@ ${additionalPrompt.trim()}
 - ${networkDescription}
 - ${tokenDescription}
 - Linked screenshots and videos are downloaded before review into the media proof manifest; read those files rather than re-fetching.
-- ${runtimeHints.networkCapability === "unrestricted" ? "Treat the target checkout as read-only; OpenClaw gateway execution does not enforce the Codex filesystem sandbox." : "The target checkout is read-only."} Use ${proofScratchDir ? `\`${proofScratchDir}\`` : "the proof scratch directory"} for evidence and generated video stills/contact sheets.
+- ${runtimeHints.networkCapability === "unrestricted" ? "Treat the target checkout as read-only; OpenClaw gateway execution does not enforce the Codex filesystem sandbox." : "The target checkout is read-only."} Use ${proofScratchDir ? `\`${proofScratchDir}\`` : "the proof scratch directory"} for evidence and generated video stills/contact sheets.${prEvidence && runtimeHints.historyCoverage ? `\n- ${reviewHistoryCapability(runtimeHints.historyCoverage, runtimeHints.networkCapability)}` : ""}
 ${mediaProofPrompt}
 ${introductionEvidence}${provenanceEvidence}
 
@@ -1007,11 +1008,17 @@ ${extra}
     });
   }
 
-  function reviewEnvironment(preserveCodexAuth?: boolean): NodeJS.ProcessEnv {
-    return untrustedCodexEnv({
+  function reviewEnvironment(sandboxMode: string, preserveCodexAuth?: boolean): NodeJS.ProcessEnv {
+    const env = untrustedCodexEnv({
       ghToken: process.env.CLAWSWEEPER_PROOF_INSPECTION_TOKEN,
       preserveCodexAuth,
     });
+    // The allowlisted proxy rejects Git's POST object fetch with HTTP 403. The
+    // host prefetches the history the reviewer needs; any other miss fails at
+    // once. Unrestricted runners keep lazy fetch for reads beyond the prefetch.
+    if (reviewNetworkCapability(sandboxMode, env).networkCapability === "allowlisted-proxy")
+      env.GIT_NO_LAZY_FETCH = "1";
+    return env;
   }
 
   function runCodex(options: {
@@ -1059,7 +1066,8 @@ ${extra}
       : prepareMediaProofArtifacts(options.context, proofScratchDir);
     const outputPath = join(options.workDir, `${options.item.number}.json`);
     if (existsSync(outputPath)) unlinkSync(outputPath);
-    const codexEnv = options.reviewEnv ?? reviewEnvironment(options.preserveCodexAuth);
+    const codexEnv =
+      options.reviewEnv ?? reviewEnvironment(options.sandboxMode, options.preserveCodexAuth);
     const prompt =
       options.prompt ??
       buildReviewPrompt(options.item, options.context, options.git, options.additionalPrompt, {
