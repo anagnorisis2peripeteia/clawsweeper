@@ -271,7 +271,6 @@ const sweepStatus = createSweepStatus({
   ROOT,
   targetProfile,
 });
-export const { sweepStatusApplyHealthForTest } = sweepStatus;
 const repositoryPaths = createRepositoryPaths({ targetProfile, targetRepo });
 const { defaultClosedDir, defaultItemsDir } = repositoryPaths;
 
