@@ -12,19 +12,23 @@ import {
   isAllowedRepairOwner,
   parseArgs,
   parseJob,
+  parseSimpleYaml,
   repoRoot,
   validateJob,
 } from "./lib.js";
 import { ghErrorText, ghJsonWithRetry } from "./github-cli.js";
 import { issueImplementationOverrideAction } from "./comment-router-core.js";
 import {
+  issueImplementationClusterId,
   issueImplementationJobBranch,
   issueImplementationJobPath,
+  issueImplementationSource,
   renderIssueImplementationJob,
   REVIEW_REPRODUCIBLE_BUG_TRIGGER_SOURCE,
   REVIEW_VIABLE_ISSUE_TRIGGER_SOURCE,
   REVIEW_VISION_FIT_TRIGGER_SOURCE,
 } from "./comment-router/dispatch.js";
+import { DEFAULT_STATE_REPOSITORY } from "./state-repo-size.js";
 import { issueSourceRevisionSha256 } from "./issue-source-guard.js";
 import {
   dispatchedIssueImplementationWorkerRetryDue,
@@ -95,7 +99,99 @@ function main() {
   if (command === "prepare") prepare();
   else if (command === "candidates") candidates();
   else if (command === "mark-dispatched") markDispatched();
+  else if (command === "restore-job") restoreJob();
   else die(`unknown command: ${command}`);
+}
+
+const RESTORED_ISSUE_JOB_HANDOFF_REASON =
+  "ClawSweeper lost the job file for this issue and could not get the original job back. This run cannot change code or open a pull request.";
+
+// A worker can start after its job file left the state checkout. Get the last
+// version of the job back from the state branch history, so that the job keeps
+// its original permissions. If that is not possible, write a job that cannot
+// change code. A restored job never gets more permissions than the original job.
+function restoreJob() {
+  const targetRepo = stringArg("target-repo").trim();
+  const itemNumber = Number(stringArg("item-number"));
+  const jobPath = stringArg("job-path").trim();
+  if (!targetRepo || !Number.isInteger(itemNumber) || itemNumber <= 0) {
+    die("restore-job requires --target-repo and a positive --item-number");
+  }
+  if (path.normalize(jobPath) !== issueImplementationJobPath(targetRepo, itemNumber)) {
+    die(`restore-job path ${jobPath} is not the job path of ${targetRepo}#${itemNumber}`);
+  }
+  const original = jobFromStateHistory(jobPath, targetRepo, itemNumber);
+  fs.mkdirSync(path.dirname(jobPath), { recursive: true });
+  fs.writeFileSync(
+    jobPath,
+    original ??
+      renderIssueImplementationJob({
+        repo: targetRepo,
+        issueNumber: itemNumber,
+        handoffReason: RESTORED_ISSUE_JOB_HANDOFF_REASON,
+      }),
+    "utf8",
+  );
+  const errors = validateJob(parseJob(jobPath));
+  if (errors.length) die(errors.join("\n"));
+  const restore = original ? "history" : "handoff";
+  const reason = original ? "" : RESTORED_ISSUE_JOB_HANDOFF_REASON;
+  writeStepOutputs({ job_restore: restore, job_restore_reason: reason });
+  console.log(JSON.stringify({ job_restore: restore, job_path: jobPath, reason }));
+}
+
+// Return the job as it was after the last state commit that changed it, or,
+// when that commit removed it, as it was before that commit. Return null when
+// any step fails or when the content is not the job of this issue.
+function jobFromStateHistory(jobPath: string, targetRepo: string, itemNumber: number) {
+  const token = String(process.env.CLAWSWEEPER_STATE_REPO_TOKEN ?? "").trim();
+  if (!token) return null;
+  const options = { env: { GH_TOKEN: token }, attempts: 3 };
+  const [owner, name] = DEFAULT_STATE_REPOSITORY.split("/");
+  // GraphQL gives a null object, not an error, when the file is not in the commit.
+  const blob = (commit: string) =>
+    ghJsonWithRetry<LooseRecord>(
+      [
+        "api",
+        "graphql",
+        "-f",
+        `query=query($expression: String!) { repository(owner: "${owner}", name: "${name}") { object(expression: $expression) { ... on Blob { text } } } }`,
+        "-f",
+        `expression=${commit}:${jobPath}`,
+      ],
+      options,
+    ).data?.repository?.object ?? null;
+  try {
+    const [latest] = ghJsonWithRetry<LooseRecord[]>(
+      [
+        "api",
+        `repos/${DEFAULT_STATE_REPOSITORY}/commits?sha=state&path=${encodeURIComponent(jobPath)}&per_page=1`,
+      ],
+      options,
+    );
+    if (!latest?.sha) return null;
+    const parent = latest.parents?.[0]?.sha;
+    // When the latest commit removed the file, the job is the parent version.
+    const content = (blob(latest.sha) ?? (parent ? blob(parent) : null))?.text;
+    if (typeof content !== "string") return null;
+    const match = content.match(/^---\n([\s\S]*?)\n---\n?/);
+    if (!match) return null;
+    const frontmatter = parseSimpleYaml(match[1] ?? "");
+    const source = issueImplementationSource(frontmatter);
+    if (
+      validateJob({ frontmatter }).length > 0 ||
+      frontmatter.source !== "issue_implementation" ||
+      frontmatter.cluster_id !== issueImplementationClusterId(targetRepo, itemNumber) ||
+      source.repo.toLowerCase() !== targetRepo.toLowerCase() ||
+      source.number !== itemNumber
+    ) {
+      return null;
+    }
+    return content;
+  } catch (error) {
+    console.warn(`issue implementation job history unavailable: ${ghErrorText(error)}`);
+    return null;
+  }
 }
 
 function prepare() {
