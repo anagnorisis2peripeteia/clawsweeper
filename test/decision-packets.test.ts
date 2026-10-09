@@ -275,6 +275,33 @@ test("decision packet sync writes pointers and removes stale generated state", (
   }
 });
 
+test("decision packet sync writes packet pointers literally and keeps CRLF headers", () => {
+  const root = mkdtempSync(tmpPrefix);
+  try {
+    const packetsDir = join(root, "records", "a$&b$'c$`d", "decision-packets");
+    const markdown = decisionReport({ maintainer_decision: JSON.stringify(productDecision) });
+    for (const input of [
+      markdown,
+      markdown.replace(/^---\n/, "---\ndecision_packet_path: old\n"),
+      markdown.replaceAll("\n", "\r\n"),
+    ]) {
+      const result = syncDecisionPacketRecord({
+        markdown: input,
+        reportPath: join(root, "records", "a$&b$'c$`d", "items", "321.md"),
+        packetsDir,
+        repoRoot: root,
+      });
+      assert.match(
+        result.markdown,
+        /^decision_packet_path: records\/a\$&b\$'c\$`d\/decision-packets\/321\.json\r?$/m,
+      );
+      assert.match(result.markdown, /^decision_packet_sha256: [a-f0-9]{64}\r?$/m);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("packet sync removes invalid legacy sidecars without clearing the report hold", () => {
   const invalidDecisions = [
     { ...productDecision, options: productDecision.options.slice(0, 1) },
