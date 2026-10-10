@@ -635,6 +635,33 @@ export function routerDispatchReceiptKey(entry: LooseRecord, claim: LooseRecord 
   return `router-${sha256(dispatchReceiptKeyMaterial(entry, claim)).slice(0, 16)}`;
 }
 
+export function endorReviewRevisionDeliveryId({
+  repo,
+  issueNumber,
+  intent,
+  headSha,
+  sourceRevision,
+}: {
+  repo: string;
+  issueNumber: number;
+  intent: string;
+  headSha: string;
+  sourceRevision: string;
+}): string {
+  if (
+    repo !== "openclaw/endor-clawsweeper-e2e" ||
+    !Number.isSafeInteger(issueNumber) ||
+    issueNumber <= 0 ||
+    !["autofix", "automerge"].includes(intent) ||
+    !/^[0-9a-f]{40}$/.test(headSha) ||
+    !/^[0-9a-f]{64}$/.test(sourceRevision)
+  ) {
+    throw new Error("Endor review revision identity input is invalid");
+  }
+  const revision = sha256(JSON.stringify([repo, issueNumber, intent, headSha, sourceRevision]));
+  return `endor-review-revision:${revision}`;
+}
+
 function forcedReplayAttemptId(entry: LooseRecord): string | null {
   const identity = forcedReplayIdentityFields(entry);
   return identity.attempt_id ? String(identity.attempt_id) : null;
