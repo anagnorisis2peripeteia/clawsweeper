@@ -19,7 +19,6 @@ import {
   MANUAL_ONLY_LABEL,
   MERGE_READY_LABEL,
   NEEDS_SECURITY_REVIEW_LABEL,
-  SECURITY_PROTECTED_LABEL_NAMES,
 } from "./exact-review-guard-labels.js";
 import {
   AUTOMERGE_STATUS_INTENTS,
@@ -40,7 +39,7 @@ import {
   unsponsoredFeatureCloseEnabled,
 } from "../policy-flags.js";
 import { isOlderThanDays } from "../iso-time.js";
-import { hasSecuritySignal } from "./security-signals.js";
+import { hasSecuritySignal, isSecurityLabel } from "./security-signals.js";
 import { summarizeChecks } from "./comment-router-utils.js";
 export const REPAIR_INTENTS = new Set([
   "fix_ci",
@@ -66,10 +65,6 @@ export function repositoryRepairCommandBlockReason(repo: JsonValue, intent: Json
 }
 export const TERMINAL_COMMAND_REACTION_STATUSES = new Set(["executed", "skipped"]);
 const REPAIR_LOOP_PAUSE_LABELS = [HUMAN_REVIEW_LABEL, MANUAL_ONLY_LABEL, MERGE_READY_LABEL];
-const TRUSTED_CLOSE_PROTECTED_LABELS = new Set<string>([
-  ...CLOSE_PROTECTED_LABEL_NAMES,
-  ...SECURITY_PROTECTED_LABEL_NAMES,
-]);
 const MAINTAINER_AUTHOR_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const UNCONFIRMED_PRODUCT_DIRECTION_MIN_AGE_DAYS = 14;
@@ -976,8 +971,8 @@ function trustedCloseRepositoryProfile(repo: JsonValue) {
 }
 
 function trustedCloseBlockingProtectedLabels(labels: JsonValue, closeReason: JsonValue): string[] {
-  const blocked = normalizedLabels(labels).filter((label) =>
-    TRUSTED_CLOSE_PROTECTED_LABELS.has(label),
+  const blocked = normalizedLabels(labels).filter(
+    (label) => CLOSE_PROTECTED_LABEL_NAMES.some((name) => name === label) || isSecurityLabel(label),
   );
   if (!isVerifiedFixedCloseReason(closeReason)) return unique(blocked);
   return unique(blocked.filter((label) => label !== "maintainer"));
@@ -1558,9 +1553,9 @@ export function issueImplementationOverrideBlockerClass(
   const labels: string[] = (target.labels ?? []).map((label: JsonValue) => String(label));
   if (labels.some((label) => ISSUE_IMPLEMENTATION_PROTECTED_LABELS.has(label.trim().toLowerCase())))
     return "hard";
-  // Only explicit security labels, ClawSweeper security markers and advisory IDs count here.
+  // Only exact security labels and structured ClawSweeper security markers count here.
   // The review model judges security risk; do not grep the issue prose for risk words.
-  if (hasSecuritySignal({ labels, text: [target.title, target.body] })) return "hard";
+  if (hasSecuritySignal({ labels, comments: [target.body] })) return "hard";
   return "soft";
 }
 
