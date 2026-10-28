@@ -327,16 +327,24 @@ test("release and CI share one qualification whose output requires every consume
   );
 });
 
-test("release caller stays manual dry-run-only with the pinned shared permissions", () => {
+test("release caller defaults to rehearsal with explicit signed-tag publication", () => {
   const caller = parse(readFileSync(".github/workflows/release.yml", "utf8"));
   assert.deepEqual(Object.keys(caller.on), ["workflow_dispatch"]);
-  assert.deepEqual(Object.keys(caller.on.workflow_dispatch.inputs), ["version"]);
+  assert.deepEqual(Object.keys(caller.on.workflow_dispatch.inputs), ["version", "publish"]);
+  assert.deepEqual(caller.on.workflow_dispatch.inputs.publish, {
+    description: "Publish from an existing signed version tag; otherwise rehearse",
+    type: "boolean",
+    default: false,
+  });
   assert.deepEqual(caller.permissions, {});
+  assert.deepEqual(caller.jobs.preflight.permissions, {});
+  assert.equal(caller.jobs.qualification.needs, "preflight");
+  assert.equal(caller.jobs.qualification.if, undefined);
   assert.deepEqual(caller.jobs.qualification.permissions, { contents: "read" });
   const release = caller.jobs.release;
   assert.equal(
     release.uses,
-    "openclaw/release-workflows/.github/workflows/release-source.yml@9d81ab3d2877f9900ef787e6dbcf4d9af96eb013",
+    "openclaw/release-workflows/.github/workflows/release-source.yml@933d6886e83ec26f29f13b3444638f0d7fd9cde3",
   );
   assert.equal(release.secrets, undefined);
   assert.deepEqual(release.permissions, {
@@ -347,8 +355,9 @@ test("release caller stays manual dry-run-only with the pinned shared permission
   });
   assert.deepEqual(release.with, {
     version: "${{ inputs.version }}",
-    dry_run: true,
+    dry_run: "${{ !inputs.publish }}",
     "require-signed-tag": true,
+    "require-current-signer": true,
     "strict-checks": true,
     "ci-check-events": '["push"]',
     "test-runs-on": "ubuntu-latest",
@@ -359,4 +368,42 @@ test("release caller stays manual dry-run-only with the pinned shared permission
     "source-archives": false,
     "homebrew-formula": "",
   });
+});
+
+test("release preflight visibly rejects publication from any other ref", () => {
+  const caller = parse(readFileSync(".github/workflows/release.yml", "utf8"));
+  const step = caller.jobs.preflight.steps[0];
+  assert.deepEqual(step.env, {
+    PUBLISH: "${{ inputs.publish }}",
+    VERSION: "${{ inputs.version }}",
+    RELEASE_REF: "${{ github.ref }}",
+  });
+  for (const [publish, version, ref, expected] of [
+    ["false", "0.3.1", "refs/heads/main", 0],
+    ["", "0.3.1", "refs/heads/main", 0],
+    ["true", "0.3.1", "refs/heads/main", 1],
+    ["true", "0.3.1", "refs/tags/v0.3.2", 1],
+    ["true", "0.3.1", "refs/tags/v0.3.1", 0],
+    ["true", "v0.3.1", "refs/tags/v0.3.1", 0],
+    ["true", "vv0.3.1", "refs/tags/v0.3.1", 1],
+  ] as const) {
+    const result = spawnSync("bash", ["-e", "-c", step.run], {
+      env: { ...process.env, PUBLISH: publish, VERSION: version, RELEASE_REF: ref },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, expected, result.stderr);
+    if (expected)
+      assert.match(result.stderr, /Publication requires the existing signed version tag/);
+  }
+});
+
+test("release signer policy is protected by the security owners", () => {
+  assert.equal(
+    readFileSync(".github/release-allowed-signers", "utf8"),
+    'vincentkoc namespaces="git" ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIMYJHwFnesHbwtPLErQBRMffbET0Wrbzh+PjkndZRNyy\n',
+  );
+  assert.match(
+    readFileSync(".github/CODEOWNERS", "utf8"),
+    /^\/\.github\/release-allowed-signers @openclaw\/openclaw-secops$/m,
+  );
 });
