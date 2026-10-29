@@ -25,6 +25,87 @@ const PAYLOAD_TABLES = [
 ] as const;
 const REVIEW_PLACEHOLDER_MARKER = STORED_JSON_PLACEHOLDER;
 
+function payloadProtectionSql(table: string): string {
+  return table.endsWith("items_v1")
+    ? `EXISTS (
+         SELECT 1 FROM github_webhook_read_model_comments_v1 c
+          WHERE c.repository = ${table}.repository AND c.number = ${table}.number
+            AND c.tombstone = 0 AND instr(c.snapshot_json, ?) > 0
+       )`
+    : table.endsWith("comments_v1")
+      ? "instr(snapshot_json, ?) > 0"
+      : "0";
+}
+
+function payloadFamilyRetireAt(sql: ReadModelStorage["sql"], repository: unknown, number: unknown) {
+  const latest = firstRow(
+    sql.exec(
+      `SELECT MAX(received_at) AS received_at FROM (
+         SELECT received_at FROM github_webhook_read_model_items_v1 WHERE repository = ? AND number = ?
+         UNION ALL
+         SELECT received_at FROM github_webhook_read_model_comments_v1 WHERE repository = ? AND number = ?
+         UNION ALL
+         SELECT received_at FROM github_webhook_read_model_activity_v1 WHERE repository = ? AND number = ?
+         UNION ALL
+         SELECT repaired_at FROM github_webhook_read_model_collections_v1 WHERE repository = ? AND number = ?
+       )`,
+      repository,
+      number,
+      repository,
+      number,
+      repository,
+      number,
+      repository,
+      number,
+    ),
+  );
+  return Number(latest?.received_at) + GITHUB_WEBHOOK_READ_MODEL_PAYLOAD_RETENTION_MS;
+}
+
+export function webhookPayloadEligibility(
+  sql: ReadModelStorage["sql"],
+  table: string,
+  afterRowid: number,
+  lastRowid: number,
+  asOf: number,
+) {
+  if (!PAYLOAD_TABLES.some((candidate) => candidate === table)) {
+    throw new Error("invalid_storage_census_retention_table");
+  }
+  const protection = payloadProtectionSql(table);
+  // Drive the bounded rowid range: the expiry index could scan unrelated due
+  // rows. Reuse the pruner's rules without returning or inflating payloads.
+  const rows = sql.exec(
+    `SELECT repository, number,
+            ${protection} AS protected, octet_length(snapshot_json) AS bytes
+       FROM ${table} NOT INDEXED WHERE rowid > ? AND rowid <= ?
+         AND payload_pruned = 0 AND payload_retire_at >= 0 AND payload_retire_at < ?
+         ${table.endsWith("items_v1") ? "" : "AND tombstone = 0"}
+       ORDER BY rowid LIMIT 64`,
+    ...(protection === "0" ? [] : [REVIEW_PLACEHOLDER_MARKER]),
+    afterRowid,
+    lastRowid,
+    asOf,
+  );
+  const deadlines = new Map<string, number>();
+  let eligibleRows = 0,
+    eligibleStoredBytes = 0;
+  for (const row of rows) {
+    if (row.protected) continue;
+    const key = `${row.repository}#${row.number}`;
+    let deadline = deadlines.get(key);
+    if (deadline === undefined) {
+      deadline = payloadFamilyRetireAt(sql, row.repository, row.number);
+      deadlines.set(key, deadline);
+    }
+    if (deadline < asOf) {
+      eligibleRows++;
+      eligibleStoredBytes += Number(row.bytes);
+    }
+  }
+  return { asOf, eligibleRows, eligibleStoredBytes };
+}
+
 type JsonRecord = Record<string, unknown>;
 type SqlRow = Record<string, unknown>;
 type ReadModelStorage = {
@@ -1392,15 +1473,7 @@ export class GithubWebhookReadModelStore {
     for (const table of PAYLOAD_TABLES) {
       // Classify at most one bounded candidate batch. Remember protected rows so
       // an expired placeholder prefix cannot be rescanned on every invocation.
-      const protectedExpression = table.endsWith("items_v1")
-        ? `EXISTS (
-             SELECT 1 FROM github_webhook_read_model_comments_v1 c
-              WHERE c.repository = ${table}.repository AND c.number = ${table}.number
-                AND c.tombstone = 0 AND instr(c.snapshot_json, ?) > 0
-           )`
-        : table.endsWith("comments_v1")
-          ? "instr(snapshot_json, ?) > 0"
-          : "0";
+      const protectedExpression = payloadProtectionSql(table);
       const rows = Array.from(
         this.storage.sql.exec(
           `SELECT rowid, repository, number, ${protectedExpression} AS protected,
@@ -1429,28 +1502,7 @@ export class GithubWebhookReadModelStore {
         const familyKey = `${row.repository}#${row.number}`;
         let deadline = familyDeadlines.get(familyKey);
         if (deadline === undefined) {
-          const latest = firstRow(
-            this.storage.sql.exec(
-              `SELECT MAX(received_at) AS received_at FROM (
-                 SELECT received_at FROM github_webhook_read_model_items_v1 WHERE repository = ? AND number = ?
-                 UNION ALL
-                 SELECT received_at FROM github_webhook_read_model_comments_v1 WHERE repository = ? AND number = ?
-                 UNION ALL
-                 SELECT received_at FROM github_webhook_read_model_activity_v1 WHERE repository = ? AND number = ?
-                 UNION ALL
-                 SELECT repaired_at FROM github_webhook_read_model_collections_v1 WHERE repository = ? AND number = ?
-               )`,
-              row.repository,
-              row.number,
-              row.repository,
-              row.number,
-              row.repository,
-              row.number,
-              row.repository,
-              row.number,
-            ),
-          );
-          deadline = Number(latest?.received_at) + GITHUB_WEBHOOK_READ_MODEL_PAYLOAD_RETENTION_MS;
+          deadline = payloadFamilyRetireAt(this.storage.sql, row.repository, row.number);
           familyDeadlines.set(familyKey, deadline);
         }
         if (deadline >= now) {
