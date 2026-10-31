@@ -4,9 +4,10 @@ import Kpi from '../../components/Kpi.astro';
 import Card from '../../components/Card.astro';
 import SegmentBar from '../../components/SegmentBar.astro';
 import ItemTable from '../../components/ItemTable.astro';
+import AssessmentAttention from '../../components/AssessmentAttention.astro';
 import Clear from '../../components/Clear.astro';
 import Icon from '../../components/Icon.astro';
-import { collectionsForRepository, repos, type Repo } from '../../lib/data';
+import { collectionsForRepository, repos, repositoryAssessments, type Repo } from '../../lib/data';
 import { repositoryCollectionStatus } from '../../lib/repository-collections';
 import { int, pct } from '../../lib/format';
 
@@ -18,8 +19,6 @@ const { repo } = Astro.props as { repo: Repo };
 const collections = collectionsForRepository(repo);
 const sections = [
   { title: 'Stalest open items', tip: 'Open items with the oldest latest review.', collection: collections.stale, meta: 'age' as const, empty: 'No stale open items in the stored corpus.' },
-  { title: 'Needs a maintainer', tip: 'Latest reviews that flagged a maintainer decision. Historical flags.', collection: collections.maintainer, meta: 'maintainer' as const, empty: 'No maintainer flags in the stored corpus.' },
-  { title: 'Security attention', tip: 'Latest reviews that marked security as needing attention.', collection: collections.security, meta: 'security' as const, empty: 'No security flags in the stored corpus.' },
   { title: 'Recent closes', tip: 'Most recent closes ClawSweeper recorded.', collection: collections.closes, meta: 'reason' as const, empty: 'No recorded closes in the stored corpus.' },
 ];
 const fresh = repo.open ? (repo.open - repo.staleOpen) / repo.open : null;
@@ -47,6 +46,8 @@ const fresh = repo.open ? (repo.open - repo.staleOpen) / repo.open : null;
       { label: 'Close', value: repo.decisions.close ?? 0, color: 'var(--close)' },
     ]} />
   </Card>
+
+  <AssessmentAttention collections={repositoryAssessments(repo.slug)} legacy={{ security: collections.security.items, maintainer: collections.maintainer.items }} limit={10} showRepo={false} />
 
   <div class="mt-3 grid gap-3 xl:grid-cols-2">
     {sections.map(section => {
