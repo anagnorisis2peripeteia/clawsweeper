@@ -10819,15 +10819,40 @@ export class ExactReviewQueue {
           observedAt: now,
           operationComplete: true,
         });
-        // Preserve a committed requeue without a receipt, plus f7's ordering
-        // rule for a matching receipt followed by a later terminal outcome.
+        if (result.duplicate) return result;
+        if (terminal?.kind === "requeue") {
+          // A retry can keep the same revision. Only its own routed publication
+          // may finish it; a delayed receipt from the failed run cannot.
+          const owner = this.readItemSync(identity.fenceKey);
+          const publication = owner?.leaseDecision?.publication;
+          const direct = publication?.directLifecycle;
+          const kind = direct?.plan.kind;
+          const prefix =
+            kind === "router"
+              ? "router-direct"
+              : kind === "router_deferred_coverage"
+                ? "router-direct-proof"
+                : kind === "router_not_required"
+                  ? "router-direct-not-required"
+                  : null;
+          if (
+            !publication ||
+            !prefix ||
+            direct?.receiptOutcome === "superseded" ||
+            owner?.state !== "leased" ||
+            owner.leaseRevision !== identity.revision ||
+            (owner.claimedAt ?? 0) <= terminal.observedAt ||
+            (owner.leaseExpiresAt ?? 0) <= now ||
+            outcome !== (kind === "router_not_required" ? "not_required" : "durable") ||
+            receiptId !== `${prefix}:${publication.producerRunId}:${publication.producerRunAttempt}`
+          )
+            return result;
+        }
         if (
-          result.duplicate ||
-          terminal?.kind === "requeue" ||
-          (receipt &&
-            terminal &&
-            terminal.kind !== "review_completed_routed" &&
-            terminal.observedAt >= receipt.observedAt)
+          receipt &&
+          terminal &&
+          terminal.kind !== "review_completed_routed" &&
+          terminal.observedAt >= receipt.observedAt
         ) {
           return result;
         }

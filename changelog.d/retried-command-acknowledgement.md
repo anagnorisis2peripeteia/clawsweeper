@@ -1,0 +1,1 @@
+- Finish the re-review acknowledgement when a failed generation retries the same revision and publishes its verdict.

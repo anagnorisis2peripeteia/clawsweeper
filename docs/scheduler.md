@@ -455,6 +455,9 @@ If a successful exact-review run loses its completion callback, reconciliation
 uses the saved lease's accepted or deduplicated direct-publication receipt and
 requeue plan to preserve one owed source-drift review. The terminal `requeue`
 disposition is recorded before completion and stays on the old fenced revision.
+When generation fails and the queue retries the same revision, the successful
+retry's direct router receipt can finish the original command. A delayed receipt
+from the failed run cannot answer it.
 A superseded receipt cannot authorize a requeue; a newer command keeps its
 current decision and revision through the ordinary finishing path.
 The terminal-run backstop retains its `*/15 * * * *` schedule. Event-triggered

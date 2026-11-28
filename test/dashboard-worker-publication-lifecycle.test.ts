@@ -4220,17 +4220,32 @@ test("terminal acknowledgement dispatch rejection remains a durable fenced retry
   }
 });
 
-test("direct command publication retains its terminal acknowledgement driver after durable handoff", async () => {
+test("successful same-revision command retry retains its terminal acknowledgement driver", async () => {
   const storage = new MemoryDurableStorage();
   const leased = leasedExactReviewQueueItem(787, "7870");
   leased.revision = 4;
   leased.leaseRevision = 4;
   leased.claimGeneration = 2;
+  Object.assign(leased, { claimedAt: Date.now() });
   const marker = "<!-- clawsweeper-command-status:787:re_review:direct -->";
   Object.assign(leased.decision, { commandStatusMarker: marker, statusCommentId: 7871 });
   Object.assign(leased.leaseDecision!, { commandStatusMarker: marker, statusCommentId: 7871 });
   await storage.put("exact-review-queue", { deliveries: {}, items: { [leased.key]: leased } });
   const queue = publicPublicationQueue(storage);
+  await queue.fetch(new Request("https://queue/stats"));
+  const lifecycle = new ExactReviewLifecycleProjectionStore(storage);
+  const identity = { canonicalTargetKey: leased.key, fenceKey: leased.key, revision: 4 };
+  const beforeRetry = Date.now() - 1_000;
+  lifecycle.recordAdmission({
+    ...identity,
+    deliveryId: "original-command",
+    sourceAction: "re_review",
+    commandOriginated: true,
+    statusMarker: marker,
+    statusCommentId: 7871,
+    observedAt: beforeRetry,
+  });
+  lifecycle.recordTerminalDisposition({ ...identity, kind: "requeue", observedAt: beforeRetry });
   const env = {
     CLAWSWEEPER_WEBHOOK_SECRET: "direct-command-secret",
     EXACT_REVIEW_QUEUE: new MemoryDurableNamespace(queue),
@@ -4256,6 +4271,7 @@ test("direct command publication retains its terminal acknowledgement driver aft
       },
     ],
     totalBytes: 1,
+    lifecycle: { kind: "router" },
   };
   const body = JSON.stringify(publication);
   const signature = `sha256=${createHmac("sha256", "direct-command-secret").update(body).digest("hex")}`;
@@ -4268,18 +4284,22 @@ test("direct command publication retains its terminal acknowledgement driver aft
     env,
   );
   assert.equal(published.status, 202);
-  const routed = await queue.fetch(
-    new Request("https://clawsweeper-exact-review-queue/lifecycle/router-receipt", {
-      method: "POST",
-      body: JSON.stringify({
-        canonical_target_key: publication.canonicalTargetKey,
-        fence_key: publication.fenceKey,
-        revision: publication.revision,
-        outcome: "durable",
-        receipt_id: "direct-command:787:router",
+  const route = (runId: string) =>
+    queue.fetch(
+      new Request("https://clawsweeper-exact-review-queue/lifecycle/router-receipt", {
+        method: "POST",
+        body: JSON.stringify({
+          canonical_target_key: publication.canonicalTargetKey,
+          fence_key: publication.fenceKey,
+          revision: publication.revision,
+          outcome: "durable",
+          receipt_id: `router-direct:${runId}:1`,
+        }),
       }),
-    }),
-  );
+    );
+  const delayed = await route("7869");
+  assert.equal((await delayed.json()).lifecycle_state, "requeue");
+  const routed = await route(leased.claimedRunId);
   assert.equal(routed.status, 200);
   const completed = await queue.fetch(
     new Request("https://clawsweeper-exact-review-queue/complete", {
